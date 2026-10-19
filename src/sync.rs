@@ -56,6 +56,17 @@ pub fn apply(cfg: &Config, report: &DiffReport, dry_run: bool, no_backup: bool) 
         return Ok(out);
     }
 
+    // The scan skips files Claude is still writing, so some planned actions
+    // may already be moot (the file exists now, or changed). If none is left,
+    // stop here: no backup, the next cycle looks again.
+    let live = report.copies.iter().any(|c| !c.dest_path.exists())
+        || report.updates.iter().any(|u| !changed_since_scan(&u.target))
+        || report.deletes.iter().any(|d| !changed_since_scan(&d.target));
+    if !live {
+        logging::verbose("nothing to do yet: files are still being written");
+        return Ok(out);
+    }
+
     // Updates and deletes replace or remove files, so exactly those targets
     // are backed up (small, frequent under full sync). A copy-only sync
     // keeps the full snapshot of every tree.

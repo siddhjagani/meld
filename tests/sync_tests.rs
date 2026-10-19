@@ -692,3 +692,64 @@ fn first_sync_prefers_latest_activity_over_file_time() {
     assert_eq!(report.updates.len(), 1);
     assert!(report.updates[0].target.account_root.ends_with("acct-b"));
 }
+
+// ---- two Claude windows saving the same conversation ----
+
+#[test]
+fn same_transcript_edited_in_two_accounts_takes_the_most_recent() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    write_session(root, "acct-a", ORG_TEAM, "x", r#"{"sessionId":"x","cliSessionId":"c1","lastAssistantUuid":"u0","lastActivityAt":1}"#);
+    write_session(root, "acct-b", ORG_MAX, "x", r#"{"sessionId":"x","cliSessionId":"c1","lastAssistantUuid":"u0","lastActivityAt":1}"#);
+    let cfg = test_config(root, state.path());
+    let m1 = scan_all(&cfg);
+
+    let a = chat_at(root, "acct-a", ORG_TEAM, "x");
+    let b = chat_at(root, "acct-b", ORG_MAX, "x");
+    fs::write(&a, r#"{"sessionId":"x","cliSessionId":"c1","lastAssistantUuid":"u1","lastActivityAt":10}"#).unwrap();
+    fs::write(&b, r#"{"sessionId":"x","cliSessionId":"c1","lastAssistantUuid":"u2","lastActivityAt":20}"#).unwrap();
+    backdate(&a);
+    backdate(&b);
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert!(report.conflicts.is_empty(), "one transcript: not a conflict");
+    assert_eq!(report.updates.len(), 1);
+    assert!(report.updates[0].target.account_root.ends_with("acct-a"), "b is the most recent");
+}
+
+#[test]
+fn different_transcripts_edited_in_two_accounts_stay_a_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    write_session(root, "acct-a", ORG_TEAM, "x", r#"{"sessionId":"x","cliSessionId":"c1"}"#);
+    write_session(root, "acct-b", ORG_MAX, "x", r#"{"sessionId":"x","cliSessionId":"c1"}"#);
+    let cfg = test_config(root, state.path());
+    let m1 = scan_all(&cfg);
+    let a = chat_at(root, "acct-a", ORG_TEAM, "x");
+    let b = chat_at(root, "acct-b", ORG_MAX, "x");
+    fs::write(&a, r#"{"sessionId":"x","cliSessionId":"fork-a","priorCliSessionIds":["c1"]}"#).unwrap();
+    fs::write(&b, r#"{"sessionId":"x","cliSessionId":"fork-b","priorCliSessionIds":["c1"]}"#).unwrap();
+    backdate(&a);
+    backdate(&b);
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert_eq!(report.conflicts.len(), 1, "two separate continuations: keep both");
+    assert!(report.updates.is_empty());
+}
+
+#[test]
+fn a_plan_made_moot_by_writes_takes_no_backup() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    write_session(root, "acct-a", ORG_TEAM, "x", r#"{"sessionId":"x"}"#);
+    fs::create_dir_all(root.join("acct-b").join(ORG_MAX)).unwrap();
+    let cfg = test_config(root, state.path());
+    let report = diff::compute(&scan_all(&cfg), cfg.policy());
+    assert_eq!(report.copies.len(), 1);
+    // Claude writes the file itself before meld gets to it.
+    write_session(root, "acct-b", ORG_MAX, "x", r#"{"sessionId":"x"}"#);
+    let out = sync::apply(&cfg, &report, false, false).unwrap();
+    assert!(out.snapshot.is_none(), "no 2000-file backup for nothing");
+    assert!(backup::list_snapshots(&cfg).unwrap().is_empty());
+}

@@ -76,6 +76,22 @@ fn recency(e: &FileEntry) -> (i64, i64) {
     (e.last_activity.unwrap_or(0), e.mtime)
 }
 
+/// Several copies were edited since they last agreed. If they all point at
+/// the same transcript (or one continued the others' transcripts), they are
+/// one conversation saved at different moments, e.g. by two Claude windows
+/// signed in to different accounts: the most recent wins. Otherwise None.
+fn latest_of_one_conversation<'a>(edited: &[&'a FileEntry]) -> Option<&'a FileEntry> {
+    let head = edited.iter().copied().find(|e| {
+        e.cli_session_id.is_some()
+            && edited.iter().all(|o| o.cli_session_id == e.cli_session_id || e.continues(o))
+    })?;
+    edited
+        .iter()
+        .copied()
+        .filter(|e| e.cli_session_id == head.cli_session_id)
+        .max_by_key(|e| recency(e))
+}
+
 /// True if `e` holds content no copy has agreed on before: a real edit made
 /// since the last agreement, not an older version written back (Claude
 /// saves its in-memory copy, which can be one meld already replaced).
@@ -177,7 +193,10 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
                         edited.iter().copied().max_by_key(|e| (e.mtime, e.size)).unwrap(),
                         Verdict::Known,
                     ),
-                    Some(_) => (newest, Verdict::Conflict), // edited differently in several places
+                    Some(_) => match latest_of_one_conversation(&edited) {
+                        Some(latest) => (latest, Verdict::Known),
+                        None => (newest, Verdict::Conflict), // edited differently in several places
+                    },
                     // No new edits: copies that differ went back to an older
                     // version, so the agreed version goes back over them.
                     None => match entries.iter().copied().find(|e| &e.content_hash == b) {

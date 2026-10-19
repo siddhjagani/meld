@@ -155,8 +155,12 @@ Occasionally the same conversation exists in two accounts with different
 content — usually because it was continued separately in each. By default
 meld never guesses which version you want: both copies stay exactly as they
 are, and the conflict is listed in `meld status`. With `propagate_updates`
-on, the newest copy wins; only copies with exactly the same modification time
-remain a conflict. Nothing about a conflict blocks the rest
+on, the copy that was actually edited wins: meld remembers the version your
+accounts last agreed on, so a copy that was only opened (Claude touches a chat
+just by showing it) never overwrites a real edit. If two accounts were both
+edited, or meld has no history for the chat yet and the modification times
+tie, it stays a conflict. Likewise, a deletion never removes a copy that was
+edited after the accounts last agreed; that chat is listed as a conflict. Nothing about a conflict blocks the rest
 of your history from syncing.
 
 ## Your safety, guaranteed by design

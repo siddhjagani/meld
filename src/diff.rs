@@ -58,6 +58,16 @@ impl DiffReport {
     }
 }
 
+/// How the canonical copy of a diverged conversation was chosen.
+enum Verdict {
+    /// Only the canonical copy changed since the accounts last agreed.
+    Edited,
+    /// No agreed version on record; the newest mtime decides.
+    ByMtime,
+    /// Several copies were edited differently: never pick one.
+    Conflict,
+}
+
 /// Mirror diff: every account should end up with the same set of
 /// conversations, in the same version.
 ///
@@ -92,10 +102,21 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
             entries.iter().map(|e| e.account_root.clone()).collect();
         report.coverage.insert(rel.clone(), have_roots.clone());
 
+        let base = manifest.base.get(rel);
+
         if policy.propagate_deletes {
             if let (Some(t), Some(marker)) =
                 (deleted.get(rel), crate::scan::session_tombstone_path(rel))
             {
+                // A copy edited since the accounts last agreed holds work the
+                // deleter never saw. Keep every copy and surface it.
+                if entries.iter().any(|e| base.is_some_and(|b| &e.content_hash != b)) {
+                    report.conflicts.push(Conflict {
+                        relative_path: rel.clone(),
+                        variants: entries.iter().map(|e| (*e).clone()).collect(),
+                    });
+                    continue;
+                }
                 for e in entries {
                     report.deletes.push(DeleteAction {
                         target: (*e).clone(),
@@ -107,11 +128,34 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
             }
         }
 
-        // Canonical source: newest mtime wins among variants.
-        let canonical = entries
+        let newest = entries
             .iter()
+            .copied()
             .max_by_key(|e| (e.mtime, e.size))
             .expect("non-empty group");
+
+        // Which copy is the latest version? If we know the version every
+        // account last agreed on, the copies that differ from it are the
+        // real edits (an unchanged copy with a fresher mtime is not one).
+        // Without that history, fall back to the newest mtime.
+        let (canonical, verdict) = match base {
+            Some(b) => {
+                let edited: Vec<&FileEntry> = entries
+                    .iter()
+                    .copied()
+                    .filter(|e| &e.content_hash != b)
+                    .collect();
+                match edited.first() {
+                    Some(f) if edited.iter().all(|e| e.content_hash == f.content_hash) => (
+                        edited.iter().copied().max_by_key(|e| (e.mtime, e.size)).unwrap(),
+                        Verdict::Edited,
+                    ),
+                    Some(_) => (newest, Verdict::Conflict), // edited differently in several accounts
+                    None => (newest, Verdict::Conflict),    // nobody differs from base: nothing to replace
+                }
+            }
+            None => (newest, Verdict::ByMtime),
+        };
 
         // content_hash ignores volatile bookkeeping fields, so two copies of
         // a conversation that only differ in "last opened" timestamps are
@@ -122,11 +166,15 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
             .filter(|e| e.content_hash != canonical.content_hash)
             .collect();
         if !stale.is_empty() {
-            // Only overwrite when the canonical copy is strictly newer than
-            // every copy it would replace; a tie means we can't tell which
-            // version is the latest.
-            let strictly_newest = stale.iter().all(|e| e.mtime < canonical.mtime);
-            if policy.propagate_updates && strictly_newest {
+            // Without history, only overwrite when the canonical copy is
+            // strictly newer than every copy it would replace; a tie means
+            // we can't tell which version is the latest.
+            let replace = match verdict {
+                Verdict::Edited => true,
+                Verdict::ByMtime => stale.iter().all(|e| e.mtime < canonical.mtime),
+                Verdict::Conflict => false,
+            };
+            if policy.propagate_updates && replace {
                 for e in stale {
                     report.updates.push(UpdateAction {
                         source: (*canonical).clone(),

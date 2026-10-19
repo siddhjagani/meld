@@ -19,6 +19,9 @@ pub fn scan(cfg: &Config, roots: &[PathBuf], previous: &Manifest) -> Result<Mani
     let mut entries = Vec::new();
     let mut tombstones = Vec::new();
     let mut skipped_recent = 0usize;
+    // Conversations with a file we could not look at yet (still being
+    // written); their agreed version must not be updated this round.
+    let mut unsettled: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 
     for root in roots {
         for item in WalkDir::new(root).follow_links(false) {
@@ -68,6 +71,9 @@ pub fn scan(cfg: &Config, roots: &[PathBuf], previous: &Manifest) -> Result<Mani
 
             if now.timestamp() - mtime < WRITE_QUIET_SECS {
                 skipped_recent += 1;
+                if let Ok(rel) = path.strip_prefix(root) {
+                    unsettled.insert(rel.to_path_buf());
+                }
                 logging::verbose(&format!(
                     "skipping (recently written): {}",
                     path.display()
@@ -116,14 +122,46 @@ pub fn scan(cfg: &Config, roots: &[PathBuf], previous: &Manifest) -> Result<Mani
         }
     }
 
+    let base = agreed_versions(&entries, &unsettled, &previous.base);
+
     Ok(Manifest {
         generated_at: now.to_rfc3339(),
         sessions_root: cfg.sessions_root.clone(),
         account_roots: roots.to_vec(),
         entries,
         tombstones,
+        base,
         skipped_recent,
     })
+}
+
+/// For each conversation, the content hash every account holding it agrees
+/// on right now (two or more accounts must hold it). While the copies
+/// disagree, only one remains, or one is still being written, the previously
+/// agreed version is kept, so a later diff can tell which
+/// copy actually changed. Conversations that no longer exist are dropped.
+fn agreed_versions(
+    entries: &[FileEntry],
+    unsettled: &std::collections::BTreeSet<PathBuf>,
+    previous: &std::collections::BTreeMap<PathBuf, String>,
+) -> std::collections::BTreeMap<PathBuf, String> {
+    let mut by_rel: std::collections::BTreeMap<&PathBuf, Vec<&str>> = std::collections::BTreeMap::new();
+    for e in entries {
+        by_rel.entry(&e.relative_path).or_default().push(&e.content_hash);
+    }
+    let mut base = std::collections::BTreeMap::new();
+    for (rel, hashes) in by_rel {
+        let agree = !unsettled.contains(rel) && hashes.iter().all(|h| *h == hashes[0]);
+        // A lone copy proves nothing: it may be the only survivor of a
+        // deletion with an edit in it. It only seeds a conversation that has
+        // no recorded version yet.
+        if agree && (hashes.len() > 1 || !previous.contains_key(rel)) {
+            base.insert(rel.clone(), hashes[0].to_string());
+        } else if let Some(b) = previous.get(rel) {
+            base.insert(rel.clone(), b.clone());
+        }
+    }
+    base
 }
 
 #[derive(Debug, PartialEq)]

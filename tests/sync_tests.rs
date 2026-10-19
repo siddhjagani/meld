@@ -299,3 +299,134 @@ fn new_account_folder_is_filled_on_next_sync() {
     sync::apply(&cfg, &report, false, true).unwrap();
     assert!(root.join("acct-new/ws1/local_x.json").exists());
 }
+
+// ---- "newest" is decided by real edits, not by file modification time ----
+
+fn scan_after(cfg: &Config, previous: &Manifest) -> Manifest {
+    let roots = discover::discover_account_roots(cfg).unwrap();
+    scan::scan(cfg, &roots, previous).unwrap()
+}
+
+/// Two accounts holding the same conversation `x`; returns the scan that
+/// records their agreed version.
+fn agreed_pair(cfg: &Config, root: &Path) -> Manifest {
+    write_session(root, "acct-a", "ws1", "x", r#"{"sessionId":"x","title":"v1"}"#);
+    write_session(root, "acct-b", "ws1", "x", r#"{"sessionId":"x","title":"v1"}"#);
+    let m = scan_all(cfg);
+    assert_eq!(m.base.len(), 1, "agreed version is recorded");
+    m
+}
+
+#[test]
+fn opening_a_stale_copy_does_not_beat_a_real_edit() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cfg = test_config(root, state.path());
+    let m1 = agreed_pair(&cfg, root);
+
+    // A is really edited; B is only opened (Claude bumps lastFocusedAt and
+    // the mtime) so its file looks newer but says the same thing as before.
+    let a = root.join("acct-a/ws1/local_x.json");
+    let b = root.join("acct-b/ws1/local_x.json");
+    fs::write(&a, r#"{"sessionId":"x","title":"v2 edited in A"}"#).unwrap();
+    set_mtime(&a, 1_650_000_000);
+    fs::write(&b, r#"{"sessionId":"x","title":"v1","lastFocusedAt":99}"#).unwrap();
+    set_mtime(&b, 1_700_000_000);
+
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert_eq!(report.updates.len(), 1);
+    assert!(report.updates[0].target.account_root.ends_with("acct-b"));
+    assert!(report.conflicts.is_empty());
+
+    sync::apply(&cfg, &report, false, false).unwrap();
+    assert!(fs::read_to_string(&a).unwrap().contains("v2 edited in A"), "A keeps its edit");
+    assert!(fs::read_to_string(&b).unwrap().contains("v2 edited in A"), "B receives it");
+}
+
+#[test]
+fn edited_in_both_accounts_is_a_conflict_even_if_one_is_newer() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cfg = test_config(root, state.path());
+    let m1 = agreed_pair(&cfg, root);
+
+    let a = root.join("acct-a/ws1/local_x.json");
+    let b = root.join("acct-b/ws1/local_x.json");
+    fs::write(&a, r#"{"sessionId":"x","title":"edit in A"}"#).unwrap();
+    set_mtime(&a, 1_650_000_000);
+    fs::write(&b, r#"{"sessionId":"x","title":"edit in B"}"#).unwrap();
+    set_mtime(&b, 1_700_000_000);
+
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert_eq!(report.conflicts.len(), 1);
+    assert!(report.updates.is_empty(), "two real edits: never pick one by mtime");
+}
+
+#[test]
+fn deleting_a_chat_that_was_edited_elsewhere_keeps_the_edit() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cfg = test_config(root, state.path());
+    let m1 = agreed_pair(&cfg, root);
+
+    // Deleted in A; meanwhile B was continued (a real edit meld had not
+    // yet synced).
+    delete_session(root, "acct-a", "ws1", "x");
+    let b = root.join("acct-b/ws1/local_x.json");
+    fs::write(&b, r#"{"sessionId":"x","title":"continued in B"}"#).unwrap();
+    backdate(&b);
+
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert!(report.deletes.is_empty());
+    assert_eq!(report.conflicts.len(), 1, "surfaced to the user");
+    sync::apply(&cfg, &report, false, false).unwrap();
+    assert!(fs::read_to_string(&b).unwrap().contains("continued in B"));
+}
+
+#[test]
+fn deleting_a_chat_nobody_edited_still_propagates() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cfg = test_config(root, state.path());
+    let m1 = agreed_pair(&cfg, root);
+
+    delete_session(root, "acct-a", "ws1", "x");
+    // B was merely opened: volatile fields and mtime move, content doesn't.
+    let b = root.join("acct-b/ws1/local_x.json");
+    fs::write(&b, r#"{"sessionId":"x","title":"v1","lastFocusedAt":99}"#).unwrap();
+    set_mtime(&b, 1_700_000_000);
+
+    let report = diff::compute(&scan_after(&cfg, &m1), cfg.policy());
+    assert_eq!(report.deletes.len(), 1);
+    assert!(report.conflicts.is_empty());
+    sync::apply(&cfg, &report, false, false).unwrap();
+    assert!(!b.exists());
+}
+
+#[test]
+fn a_file_still_being_written_does_not_record_an_agreed_version() {
+    let tmp = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = tmp.path();
+    // A's copy is brand new (inside the quiet window, so the scan skips it);
+    // B's older copy must not be recorded as "agreed" on its own.
+    write_session(root, "acct-a", "ws1", "x", r#"{"sessionId":"x","title":"fresh"}"#);
+    write_session(root, "acct-b", "ws1", "x", r#"{"sessionId":"x","title":"old"}"#);
+    backdate(&root.join("acct-b/ws1/local_x.json"));
+
+    let cfg = test_config(root, state.path());
+    assert!(scan_all(&cfg).base.is_empty());
+}
+
+#[test]
+fn manifest_from_before_this_change_still_loads() {
+    let m: Manifest = serde_json::from_str(
+        r#"{"generated_at":"","sessions_root":"/","account_roots":[],"entries":[]}"#,
+    )
+    .unwrap();
+    assert!(m.base.is_empty() && m.tombstones.is_empty());
+}

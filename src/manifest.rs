@@ -57,6 +57,11 @@ pub struct Manifest {
     pub entries: Vec<FileEntry>,
     #[serde(default)]
     pub tombstones: Vec<Tombstone>,
+    /// Per conversation: the version every account holding it last agreed
+    /// on (content hash). Lets sync tell a real edit from a file whose
+    /// mtime merely moved (Claude rewrites a chat just by opening it).
+    #[serde(default)]
+    pub base: std::collections::BTreeMap<PathBuf, String>,
     /// Files skipped by this scan because they were still being written;
     /// a watcher should rescan shortly even if no new event arrives.
     #[serde(skip)]

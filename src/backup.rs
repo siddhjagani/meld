@@ -6,10 +6,14 @@ use chrono::Utc;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Name suffix of snapshots that hold every account tree (see
+/// `Config::max_full_snapshots`). Per-file snapshots have no suffix.
+const FULL_SUFFIX: &str = "-full";
+
 /// Snapshot every account tree into ~/.meld/backups/<timestamp>/ preserving
 /// the layout relative to the sessions root. Returns the snapshot dir.
 pub fn snapshot(cfg: &Config, roots: &[PathBuf]) -> Result<PathBuf> {
-    let stamp = Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    let stamp = format!("{}{FULL_SUFFIX}", Utc::now().format("%Y%m%dT%H%M%S%3fZ"));
     let dest = cfg.backups_dir().join(&stamp);
     std::fs::create_dir_all(&dest)?;
 
@@ -81,9 +85,33 @@ pub fn list_snapshots(cfg: &Config) -> Result<Vec<PathBuf>> {
     Ok(snaps)
 }
 
-/// Keep only the newest `max_snapshots` (never pruning `keep`).
+/// Keep only the newest `max_full_snapshots` full snapshots and the newest
+/// `max_snapshots` overall (never pruning `keep`).
 fn prune(cfg: &Config, keep: Option<&Path>) -> Result<()> {
-    let snaps = list_snapshots(cfg)?;
+    let is_full = |p: &PathBuf| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(FULL_SUFFIX))
+    };
+    let mut snaps = list_snapshots(cfg)?;
+    let full = snaps.iter().filter(|p| is_full(p)).count();
+    let mut excess_full = full.saturating_sub(cfg.max_full_snapshots);
+    let mut removed = Vec::new();
+    for s in snaps.iter().filter(|p| is_full(p)) {
+        if excess_full == 0 {
+            break;
+        }
+        if Some(s.as_path()) != keep {
+            removed.push(s.clone());
+        }
+        excess_full -= 1;
+    }
+    for old in &removed {
+        logging::verbose(&format!("pruning old full snapshot {}", old.display()));
+        std::fs::remove_dir_all(old)?;
+    }
+    snaps.retain(|s| !removed.contains(s));
+
     if snaps.len() > cfg.max_snapshots {
         for old in &snaps[..snaps.len() - cfg.max_snapshots] {
             if Some(old.as_path()) == keep {

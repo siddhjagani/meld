@@ -16,6 +16,9 @@ pub struct Config {
     pub debounce_ms: u64,
     /// Keep at most this many snapshots (oldest pruned first).
     pub max_snapshots: usize,
+    /// Full snapshots copy every account tree (tens of MB each), so they get
+    /// their own, smaller cap on top of `max_snapshots`.
+    pub max_full_snapshots: usize,
     /// File name patterns to ignore (exact basename match).
     pub ignore: Vec<String>,
     /// Opt-in: a conversation deleted in one account is deleted in every
@@ -40,6 +43,7 @@ impl Default for Config {
             state_dir: home_dir().join(".meld"),
             debounce_ms: 1500,
             max_snapshots: 200,
+            max_full_snapshots: 10,
             ignore: vec![".DS_Store".into(), "desktop.ini".into(), "Thumbs.db".into()],
             propagate_deletes: false,
             propagate_updates: false,

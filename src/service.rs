@@ -49,38 +49,12 @@ fn xml_escape(s: &str) -> String {
 /// Write the LaunchAgent plist and (re)load it.
 pub fn install() -> Result<()> {
     ensure_macos()?;
-    let exe = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
-        .context("locating the meld executable")?;
+    // Not canonicalized on purpose: a Homebrew symlink (/opt/homebrew/bin/meld)
+    // survives `brew upgrade`, the versioned Cellar path it points to does not.
+    let exe = std::env::current_exe().context("locating the meld executable")?;
+    let exe = if exe.is_absolute() { exe } else { std::env::current_dir()?.join(exe) };
     let log = log_path();
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>watch</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>{log}</string>
-    <key>StandardErrorPath</key>
-    <string>{log}</string>
-</dict>
-</plist>
-"#,
-        exe = xml_escape(&exe.display().to_string()),
-        log = xml_escape(&log.display().to_string()),
-    );
+    let plist = render_plist(&exe, &log);
 
     let path = plist_path();
     if let Some(parent) = path.parent() {
@@ -109,6 +83,38 @@ pub fn install() -> Result<()> {
     logging::info("Background sync is on. It starts at login and keeps every account in sync.");
     logging::info(&format!("Log: {}", log.display()));
     Ok(())
+}
+
+/// The LaunchAgent definition for `meld watch`.
+pub fn render_plist(exe: &std::path::Path, log: &std::path::Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>watch</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+</dict>
+</plist>
+"#,
+        exe = xml_escape(&exe.display().to_string()),
+        log = xml_escape(&log.display().to_string()),
+    )
 }
 
 /// Stop the agent and remove its plist.

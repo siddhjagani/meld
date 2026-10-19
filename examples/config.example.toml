@@ -13,6 +13,10 @@ debounce_ms = 1500
 # hold only the files a sync replaced or deleted, so they are small.
 max_snapshots = 200
 
+# Full snapshots (`meld backup`, copy-only syncs) copy every account tree and
+# are big, so they have their own smaller cap.
+max_full_snapshots = 10
+
 # Basenames to ignore everywhere
 ignore = [".DS_Store"]
 

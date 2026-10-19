@@ -13,7 +13,10 @@ Read `context.md` first for current state and decisions.
 2. Only overwrite a session file with a strictly newer copy of the same
    conversation (`propagate_updates`, opt-in, off by default). Equal mtimes + different content =
    conflict, surfaced to the user, both variants kept. Skip any target whose
-   size/mtime moved since the scan.
+   size/mtime moved since the scan. "Newest" means the copy edited since the
+   accounts last agreed (`Manifest::base`); mtime alone only decides when no
+   agreed version is on record. A copy edited since then is never deleted by
+   a propagated deletion.
 3. Every write is temp-file + fsync + rename (`.meld-tmp` suffix — the
    watcher ignores that suffix to avoid feedback loops).
 4. `meld sync` snapshots before its first write unless `--no-backup`: all
@@ -39,6 +42,8 @@ Read `context.md` first for current state and decisions.
   collect `deleted_*` markers; reuses hashes when size+mtime unchanged) →
   `diff` (copy / update / delete plan) → `sync` (apply). Other files in the
   trees (e.g. `scheduled-tasks.json`) are per-account and never synced.
+- Full snapshots (`meld backup`, copy-only syncs; name ends `-full`) have their
+  own cap `max_full_snapshots`; per-file snapshots use `max_snapshots`.
 - `service` installs `meld watch` as the `com.meld.watch` LaunchAgent (macOS).
 - `watch` re-runs the whole pipeline after a debounced event burst.
 - State in `~/.meld/` (`config.toml`, `manifest.json`, `backups/`, `meld.lock`).

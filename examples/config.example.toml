@@ -20,9 +20,12 @@ max_full_snapshots = 10
 # Basenames to ignore everywhere
 ignore = [".DS_Store"]
 
-# Opt-in full sync (see README). Off by default: meld only adds files.
-# A conversation deleted in one account is deleted in every account
-propagate_deletes = false
+# What happens to a chat you delete (see README):
+#   "come_back"         (default) it comes back from the other accounts
+#   "stay_deleted_here" stays deleted in the account/org you deleted it in
+#   "delete_everywhere" deleted in every account and organization
+deleted_chats = "come_back"
 
-# The newest version of a conversation replaces older copies in other accounts
-propagate_updates = false
+# On by default: the edited version of a conversation replaces older copies in
+# other accounts (replaced copies are backed up). false = keep both as a conflict
+propagate_updates = true

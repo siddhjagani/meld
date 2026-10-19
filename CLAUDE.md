@@ -7,24 +7,32 @@ Read `context.md` first for current state and decisions.
 ## Invariants (do not break)
 
 1. Only delete a session file to mirror a deletion Claude made in another
-   account (`propagate_deletes`, opt-in, off by default): write the `deleted_<chat>` marker the way
+   account (`deleted_chats = "delete_everywhere"`, opt-in; default
+   `come_back` never deletes): write the `deleted_<chat>` marker the way
    Claude does, then remove `local_<chat>.json`. Restore may remove deletion
    markers to un-delete. Nothing else is ever deleted from session trees.
 2. Only overwrite a session file with a strictly newer copy of the same
-   conversation (`propagate_updates`, opt-in, off by default). Equal mtimes + different content =
+   conversation (`propagate_updates`, on by default, can be turned off). Equal mtimes + different content =
    conflict, surfaced to the user, both variants kept. Skip any target whose
    size/mtime moved since the scan. "Newest" means the copy edited since the
    accounts last agreed (`Manifest::base`); mtime alone only decides when no
-   agreed version is on record. A copy edited since then is never deleted by
-   a propagated deletion.
+   agreed version is on record (then transcript lineage `priorCliSessionIds`,
+   then `lastActivityAt`, then mtime). A copy that goes back to a version in
+   `Manifest::history` is stale (Claude saved its in-memory copy) and is
+   repaired, never spread. Updates merge: `scan::LOCAL_KEYS` (org
+   connectors, per-account errors, process handles) keep the target's
+   values and never count as a difference. A copy edited since the last
+   agreement is never deleted by a propagated deletion.
 3. Every write is temp-file + fsync + rename (`.meld-tmp` suffix — the
    watcher ignores that suffix to avoid feedback loops).
 4. `meld sync` snapshots before its first write unless `--no-backup`: all
    trees for a copy-only sync, or exactly the files it replaces or deletes
    when full sync is on. A restore snapshots the files it replaces or
    removes first, so it can be undone.
-5. Content decides identity, not folder names. The sync key is the path
-   relative to the account root; equality is sha256.
+5. Content decides identity, not folder names. The sync key is the chat's
+   file name (`local_<chat>.json`): every org folder of every account gets
+   every chat. Org folders are UUID-named dirs under an account (the app's
+   own rule); other folders and Claude's sub-folders are never touched.
 6. Never decrypt Claude's OAuth token or read Keychain secrets to show
    email/org names. Account identity in output is always an on-disk
    fingerprint (`src/accounts.rs`), never the real human identity.

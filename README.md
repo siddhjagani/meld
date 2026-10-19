@@ -16,12 +16,12 @@ in a different account folder.
 Meld fixes this. It finds every account's session folder, works out which
 conversations are missing where, and copies them so every account sees the
 same complete history. Everything happens locally on your Mac. Nothing is
-uploaded anywhere, nothing is ever deleted (unless you opt in to full sync),
+uploaded anywhere, nothing is ever deleted (unless you opt in to delete syncing),
 and every change can be undone.
 
-If an account belongs to more than one organization (for example a personal
-space and a team), meld treats each one as its own history and keeps that
-organization in sync across every account that has it.
+Every conversation reaches every organization of every account: personal,
+team, Max or any other plan, in any login. Start a chat on a team plan, hit
+its limit, and carry on in your Max account.
 
 ## Install
 
@@ -67,29 +67,50 @@ copy them across your accounts within a couple of seconds. Press Ctrl-C to
 stop. Signing into a brand-new account later requires no setup — meld detects
 the new account folder on its own and fills it with your existing history.
 
-## Optional: full sync (updates and deletions follow you)
+## Updates and deletions follow you
 
-By default meld only adds: new conversations are copied to every account and
-nothing is ever replaced or deleted. Only conversations are synced —
-per-account files such as `scheduled-tasks.json` stay with their account.
+New conversations are copied everywhere, and continued conversations are
+updated everywhere (on by default). Only conversations are synced; per-account
+files such as `scheduled-tasks.json` stay with their account.
 
-If you want every account to stay identical, not just complete, turn on full
-sync in `~/.meld/config.toml` (create it with `meld config init`):
+Settings live in `~/.meld/config.toml` (create it with `meld config init`):
 
 ```toml
-propagate_updates = true   # continued chats: newest copy replaces older ones
-propagate_deletes = true   # deleted chats: deleted in every account
+propagate_updates = true      # continued chats are updated in every account
+deleted_chats = "come_back"   # or "stay_deleted_here" / "delete_everywhere"
 ```
 
-- **Continued conversations**: the newest copy replaces the older copies in
-  the other accounts, so you can pick up where you left off after switching.
-- **Deleted conversations** are deleted in every account — delete a chat
-  while signed in to A, and it is gone when you sign in to B. Meld deletes it
-  the same way Claude does (a `deleted_<chat>` marker replaces the file), so a
-  deleted conversation is never copied back.
+- **Continued conversations** (`propagate_updates`, on by default): the copy
+  you actually continued replaces the older copies, so you can pick up where
+  you left off after switching. Each account keeps its own account-bound
+  details (that org's connectors, its own "usage limit reached" error).
+  If Claude saves an old copy back over a newer one, meld restores the newer
+  one instead of spreading the old one. Set it to `false` if you want meld to
+  only ever add.
+- **Deleted conversations** (`deleted_chats`):
+  - `"come_back"` (default): a chat you delete comes back from the accounts
+    that still have it. Nothing is ever deleted.
+  - `"stay_deleted_here"`: it stays deleted in the account and organization
+    you deleted it in; every other account keeps it.
+  - `"delete_everywhere"`: it is deleted in every account, the same way
+    Claude deletes it (a `deleted_<chat>` marker replaces the file).
 
 Every copy that is replaced or deleted is backed up first; `meld restore`
 puts it back.
+
+## Seeing synced chats without restarting Claude
+
+Claude reads its chat list into memory when you sign in, so chats synced
+while it is open don't show up by themselves. Any of these makes it reload:
+
+- **Switch account or organization in Claude.** It saves, then reads the new
+  account's list from disk, so with background sync on everything is
+  already there.
+- **Close the Claude window (⌘W) and click its Dock icon.** A new window
+  re-reads the list and shows newly synced chats. A chat that was already
+  open keeps the version Claude has in memory.
+- **`meld sync --restart-claude`** quits Claude (so it saves first), syncs,
+  and reopens it. This always gives you the exact latest state.
 
 ## Run it in the background (macOS)
 
@@ -152,10 +173,10 @@ full snapshot of every account at any time with `meld backup`.
 ## About conflicts
 
 Occasionally the same conversation exists in two accounts with different
-content — usually because it was continued separately in each. By default
-meld never guesses which version you want: both copies stay exactly as they
-are, and the conflict is listed in `meld status`. With `propagate_updates`
-on, the copy that was actually edited wins: meld remembers the version your
+content — usually because it was continued separately in each. With
+`propagate_updates` off, meld never guesses which version you want: both
+copies stay exactly as they are, and the conflict is listed in `meld status`.
+With it on (the default), the copy that was actually edited wins: meld remembers the version your
 accounts last agreed on, so a copy that was only opened (Claude touches a chat
 just by showing it) never overwrites a real edit. If two accounts were both
 edited, or meld has no history for the chat yet and the modification times
@@ -165,9 +186,10 @@ of your history from syncing.
 
 ## Your safety, guaranteed by design
 
-- By default meld never deletes or overwrites a file. With full sync on, it
-  only deletes or replaces a conversation to mirror what you did in another
-  account, and every such file is backed up first.
+- Meld never deletes a file unless you set `deleted_chats = "delete_everywhere"`. It only
+  replaces a conversation with the copy you actually edited in another
+  account (`propagate_updates`, on by default), and every replaced or deleted
+  file is backed up first.
 - A file that changed since meld looked at it is skipped, never clobbered.
 - Every change can be undone with one command (`meld restore`).
 - Files are written atomically, so an interruption (crash, power loss) can

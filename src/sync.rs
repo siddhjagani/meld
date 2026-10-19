@@ -102,7 +102,8 @@ pub fn apply(cfg: &Config, report: &DiffReport, dry_run: bool, no_backup: bool) 
             out.skipped += 1;
             continue;
         }
-        write_atomic(&u.target.file_path, &read(&u.source.file_path)?, u.source.mtime)?;
+        let data = merged_update(&u.source.file_path, &u.target.file_path)?;
+        write_atomic(&u.target.file_path, &data, u.source.mtime)?;
         logging::verbose(&format!(
             "updated {} from {}",
             u.target.file_path.display(),
@@ -182,6 +183,29 @@ pub fn print_plan(report: &DiffReport) {
         logging::info(&format!("  - delete  {}", describe(&d.target)));
         logging::verbose(&format!("    {}", d.target.file_path.display()));
     }
+}
+
+/// The latest copy of a conversation, with the target's account-bound
+/// fields kept as they are (`scan::LOCAL_KEYS`: that org's connectors, its
+/// own errors, local process handles). Falls back to the plain source bytes
+/// if either file isn't a JSON object.
+pub fn merged_update(source: &Path, target: &Path) -> Result<Vec<u8>> {
+    use serde_json::Value;
+    let src = read(source)?;
+    let parse = |b: &[u8]| match serde_json::from_slice::<Value>(b) {
+        Ok(Value::Object(m)) => Some(m),
+        _ => None,
+    };
+    let (Some(mut merged), Some(own)) = (parse(&src), fs::read(target).ok().as_deref().and_then(parse)) else {
+        return Ok(src);
+    };
+    for key in crate::scan::LOCAL_KEYS {
+        match own.get(*key) {
+            Some(v) => merged.insert((*key).to_string(), v.clone()),
+            None => merged.remove(*key),
+        };
+    }
+    Ok(serde_json::to_vec(&Value::Object(merged))?)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {

@@ -1,5 +1,5 @@
 use crate::backup;
-use crate::config::Config;
+use crate::config::{Config, DeletedChats};
 use crate::errors::{MeldError, Result};
 use crate::{discover, logging, scan};
 use anyhow::Context;
@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 /// - With `propagate_updates`, restored copies are stamped as the newest
 ///   version, so the next sync spreads them to every account instead of
 ///   replacing them.
-/// - With `propagate_deletes`, a conversation brought back is un-deleted
+/// - With `deleted_chats = "delete_everywhere"`, a conversation brought back is un-deleted
 ///   everywhere: deletion markers for it that are not part of the snapshot
 ///   are removed from every account.
 pub fn restore(cfg: &Config, name: Option<&str>, dry_run: bool) -> Result<usize> {
@@ -48,7 +48,9 @@ pub fn restore(cfg: &Config, name: Option<&str>, dry_run: bool) -> Result<usize>
             continue;
         }
         let rel = item.path().strip_prefix(&snap)?;
-        in_snapshot.insert(account_relative(rel));
+        if let Some(name) = rel.file_name() {
+            in_snapshot.insert(PathBuf::from(name));
+        }
         let target = cfg.sessions_root.join(rel);
         if same_bytes(item.path(), &target) {
             continue;
@@ -57,19 +59,17 @@ pub fn restore(cfg: &Config, name: Option<&str>, dry_run: bool) -> Result<usize>
     }
 
     let roots = discover::discover_account_roots(cfg)?;
+    let everywhere = cfg.policy().deletes == DeletedChats::DeleteEverywhere;
     let mut lift: Vec<PathBuf> = Vec::new();
-    for (_, target) in plan.iter().filter(|_| cfg.propagate_deletes) {
-        let Ok(rel) = target.strip_prefix(&cfg.sessions_root) else {
-            continue;
-        };
-        let Some(marker) = scan::session_tombstone_path(&account_relative(rel)) else {
+    for (_, target) in plan.iter().filter(|_| everywhere) {
+        let Some(marker) = target.file_name().and_then(|n| scan::session_tombstone_path(Path::new(n))) else {
             continue;
         };
         if in_snapshot.contains(&marker) {
             continue;
         }
-        for root in &roots {
-            let m = root.join(&marker);
+        for dir in roots.iter().flat_map(|r| scan::org_dirs(r)) {
+            let m = dir.join(&marker);
             if m.exists() && !lift.contains(&m) {
                 lift.push(m);
             }
@@ -156,11 +156,6 @@ pub fn list(cfg: &Config) -> Result<()> {
     }
     println!("\nRestore one with `meld restore --snapshot <name>`.");
     Ok(())
-}
-
-/// `<account>/<org>/file` -> `<org>/file`
-fn account_relative(rel: &Path) -> PathBuf {
-    rel.components().skip(1).collect()
 }
 
 fn same_bytes(a: &Path, b: &Path) -> bool {

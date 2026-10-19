@@ -1,4 +1,4 @@
-use crate::config::Policy;
+use crate::config::{DeletedChats, Policy};
 use crate::manifest::{FileEntry, Manifest, Tombstone};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -60,98 +60,130 @@ impl DiffReport {
 
 /// How the canonical copy of a diverged conversation was chosen.
 enum Verdict {
-    /// Only the canonical copy changed since the accounts last agreed.
-    Edited,
-    /// No agreed version on record; the newest mtime decides.
+    /// The canonical copy is known to be the latest: it is the only real
+    /// edit since the copies last agreed, or the agreed version itself when
+    /// the other copies only went back to older versions.
+    Known,
+    /// No agreed version on record; transcript lineage, then the latest
+    /// activity and file time decide.
     ByMtime,
     /// Several copies were edited differently: never pick one.
     Conflict,
 }
 
-/// Mirror diff: every account should end up with the same set of
-/// conversations, in the same version.
+/// Ordering for "most recently used" when no history is known.
+fn recency(e: &FileEntry) -> (i64, i64) {
+    (e.last_activity.unwrap_or(0), e.mtime)
+}
+
+/// True if `e` holds content no copy has agreed on before: a real edit made
+/// since the last agreement, not an older version written back (Claude
+/// saves its in-memory copy, which can be one meld already replaced).
+fn is_new_edit(e: &FileEntry, base: Option<&String>, past: Option<&Vec<String>>) -> bool {
+    base.is_some_and(|b| &e.content_hash != b)
+        && !past.is_some_and(|p| p.contains(&e.content_hash))
+}
+
+/// Mirror diff: every organization folder of every account should end up
+/// holding every conversation, in the same version. A conversation is
+/// identified by its file name (`local_<chat>.json`), wherever it lives.
 ///
 /// Policy, in order:
-/// 1. a conversation deleted in any account (a `deleted_<chat>` marker
-///    exists) is deleted in every account that still has it, and never
-///    copied anywhere (`propagate_deletes`)
-/// 2. path missing from a root → copy (newest-mtime variant is canonical)
-/// 3. same path, different content → the newest copy replaces the older
-///    ones (`propagate_updates`); with that off, or when no copy is strictly
-///    newest, the divergence is reported as a conflict and nothing is
-///    overwritten.
+/// 1. a conversation with a `deleted_<chat>` marker: with
+///    `delete_everywhere` it is deleted in every folder that has it; with
+///    `stay_deleted_here` it is not copied back into the folder holding the
+///    marker; with `come_back` (default) the marker is ignored
+/// 2. folder missing the conversation → copy the canonical version
+/// 3. copies with different content → the canonical copy replaces the others
+///    (`propagate_updates`); when no copy can be picked, or updates are off,
+///    the divergence is reported as a conflict and nothing is overwritten.
 pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
-    let mut by_rel: BTreeMap<PathBuf, Vec<&FileEntry>> = BTreeMap::new();
+    let mut by_chat: BTreeMap<PathBuf, Vec<&FileEntry>> = BTreeMap::new();
     for e in &manifest.entries {
-        by_rel.entry(e.relative_path.clone()).or_default().push(e);
+        by_chat.entry(e.chat()).or_default().push(e);
     }
 
-    // Newest marker per deleted conversation.
-    let mut deleted: BTreeMap<&PathBuf, &Tombstone> = BTreeMap::new();
+    let mut markers: BTreeMap<&PathBuf, Vec<&Tombstone>> = BTreeMap::new();
     for t in &manifest.tombstones {
-        let slot = deleted.entry(&t.session_path).or_insert(t);
-        if t.mtime > slot.mtime {
-            *slot = t;
-        }
+        markers.entry(&t.session_path).or_default().push(t);
     }
+
+    // Accounts with no organization folder yet get the source's folder name.
+    let bare_accounts: Vec<&PathBuf> = manifest
+        .account_roots
+        .iter()
+        .filter(|r| !manifest.org_dirs.iter().any(|d| d.parent() == Some(r.as_path())))
+        .collect();
 
     let mut report = DiffReport::default();
 
-    for (rel, entries) in &by_rel {
-        let have_roots: Vec<PathBuf> =
+    for (chat, entries) in &by_chat {
+        let mut have_roots: Vec<PathBuf> =
             entries.iter().map(|e| e.account_root.clone()).collect();
-        report.coverage.insert(rel.clone(), have_roots.clone());
+        have_roots.dedup();
+        report.coverage.insert(chat.clone(), have_roots);
 
-        let base = manifest.base.get(rel);
+        let base = manifest.base.get(chat);
+        let past = manifest.history.get(chat);
+        let chat_markers = markers.get(chat);
 
-        if policy.propagate_deletes {
-            if let (Some(t), Some(marker)) =
-                (deleted.get(rel), crate::scan::session_tombstone_path(rel))
-            {
-                // A copy edited since the accounts last agreed holds work the
+        if policy.deletes == DeletedChats::DeleteEverywhere {
+            if let (Some(ms), Some(marker)) = (chat_markers, crate::scan::session_tombstone_path(chat)) {
+                // A copy edited since the copies last agreed holds work the
                 // deleter never saw. Keep every copy and surface it.
-                if entries.iter().any(|e| base.is_some_and(|b| &e.content_hash != b)) {
+                if entries.iter().any(|e| is_new_edit(e, base, past)) {
                     report.conflicts.push(Conflict {
-                        relative_path: rel.clone(),
+                        relative_path: chat.clone(),
                         variants: entries.iter().map(|e| (*e).clone()).collect(),
                     });
                     continue;
                 }
+                let newest_marker = ms.iter().max_by_key(|t| t.mtime).expect("non-empty");
                 for e in entries {
                     report.deletes.push(DeleteAction {
                         target: (*e).clone(),
-                        tombstone: (*t).clone(),
-                        tombstone_dest: e.account_root.join(&marker),
+                        tombstone: (*newest_marker).clone(),
+                        tombstone_dest: e.folder().join(&marker),
                     });
                 }
                 continue;
             }
         }
 
+        // Without history: a copy that continued another copy's transcript
+        // is newer; otherwise the latest activity, then the latest file time.
         let newest = entries
             .iter()
             .copied()
-            .max_by_key(|e| (e.mtime, e.size))
+            .filter(|e| !entries.iter().any(|o| o.continues(e)))
+            .max_by_key(|e| recency(e))
+            .or_else(|| entries.iter().copied().max_by_key(|e| recency(e)))
             .expect("non-empty group");
 
-        // Which copy is the latest version? If we know the version every
-        // account last agreed on, the copies that differ from it are the
-        // real edits (an unchanged copy with a fresher mtime is not one).
-        // Without that history, fall back to the newest mtime.
+        // Which copy is the latest version? If we know the version the
+        // copies last agreed on, the copies holding new content are the real
+        // edits (an unchanged copy with a fresher mtime is not one, and
+        // neither is a copy that went back to an older version). Without
+        // that history, fall back to the newest mtime.
         let (canonical, verdict) = match base {
             Some(b) => {
                 let edited: Vec<&FileEntry> = entries
                     .iter()
                     .copied()
-                    .filter(|e| &e.content_hash != b)
+                    .filter(|e| is_new_edit(e, base, past))
                     .collect();
                 match edited.first() {
                     Some(f) if edited.iter().all(|e| e.content_hash == f.content_hash) => (
                         edited.iter().copied().max_by_key(|e| (e.mtime, e.size)).unwrap(),
-                        Verdict::Edited,
+                        Verdict::Known,
                     ),
-                    Some(_) => (newest, Verdict::Conflict), // edited differently in several accounts
-                    None => (newest, Verdict::Conflict),    // nobody differs from base: nothing to replace
+                    Some(_) => (newest, Verdict::Conflict), // edited differently in several places
+                    // No new edits: copies that differ went back to an older
+                    // version, so the agreed version goes back over them.
+                    None => match entries.iter().copied().find(|e| &e.content_hash == b) {
+                        Some(current) => (current, Verdict::Known),
+                        None => (newest, Verdict::Conflict),
+                    },
                 }
             }
             None => (newest, Verdict::ByMtime),
@@ -170,8 +202,10 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
             // strictly newer than every copy it would replace; a tie means
             // we can't tell which version is the latest.
             let replace = match verdict {
-                Verdict::Edited => true,
-                Verdict::ByMtime => stale.iter().all(|e| e.mtime < canonical.mtime),
+                Verdict::Known => true,
+                Verdict::ByMtime => stale
+                    .iter()
+                    .all(|e| canonical.continues(e) || (!e.continues(canonical) && recency(e) < recency(canonical))),
                 Verdict::Conflict => false,
             };
             if policy.propagate_updates && replace {
@@ -183,20 +217,33 @@ pub fn compute(manifest: &Manifest, policy: Policy) -> DiffReport {
                 }
             } else {
                 report.conflicts.push(Conflict {
-                    relative_path: rel.clone(),
+                    relative_path: chat.clone(),
                     variants: entries.iter().map(|e| (*e).clone()).collect(),
                 });
             }
         }
 
-        for root in &manifest.account_roots {
-            if !have_roots.contains(root) {
-                report.copies.push(CopyAction {
-                    source: (*canonical).clone(),
-                    dest_root: root.clone(),
-                    dest_path: root.join(rel),
-                });
+        for dir in &manifest.org_dirs {
+            if entries.iter().any(|e| e.folder() == dir) {
+                continue;
             }
+            let deleted_here = chat_markers
+                .is_some_and(|ms| ms.iter().any(|t| t.file_path.parent() == Some(dir.as_path())));
+            if deleted_here && policy.deletes == DeletedChats::StayDeletedHere {
+                continue;
+            }
+            report.copies.push(CopyAction {
+                source: (*canonical).clone(),
+                dest_root: dir.parent().unwrap_or(dir).to_path_buf(),
+                dest_path: dir.join(chat),
+            });
+        }
+        for root in &bare_accounts {
+            report.copies.push(CopyAction {
+                source: (*canonical).clone(),
+                dest_root: (*root).clone(),
+                dest_path: root.join(&canonical.relative_path),
+            });
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod backup;
+pub mod claude_app;
 pub mod cli;
 pub mod config;
 pub mod diff;

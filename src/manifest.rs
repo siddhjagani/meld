@@ -10,7 +10,7 @@ pub struct FileEntry {
     pub account_root: PathBuf,
     /// Absolute path of the file.
     pub file_path: PathBuf,
-    /// Path relative to the account root (the sync key).
+    /// Path relative to the account root (`<org>/local_<chat>.json`).
     pub relative_path: PathBuf,
     pub sha256: String,
     /// Hash of the JSON content with volatile bookkeeping fields
@@ -33,6 +33,15 @@ pub struct FileEntry {
     pub cwd: Option<String>,
     /// RFC 3339 timestamp of the scan that last saw this file.
     pub last_seen_at: String,
+    /// Transcript this copy points at, and the ones it continued from: a
+    /// copy listing another copy's transcript as prior is certainly newer.
+    #[serde(default)]
+    pub cli_session_id: Option<String>,
+    #[serde(default)]
+    pub prior_cli_session_ids: Vec<String>,
+    /// `lastActivityAt` from the JSON (ms), when present.
+    #[serde(default)]
+    pub last_activity: Option<i64>,
 }
 
 /// A `deleted_<chat>` marker: Claude writes one (containing the deletion
@@ -42,8 +51,8 @@ pub struct Tombstone {
     pub account_root: PathBuf,
     /// Absolute path of the marker file.
     pub file_path: PathBuf,
-    /// Relative path of the session file this marker stands for
-    /// (`<org>/local_<chat>.json`) — the same sync key as `FileEntry`.
+    /// The conversation this marker stands for, as its file name
+    /// (`local_<chat>.json`) — the same sync key as `FileEntry::chat`.
     pub session_path: PathBuf,
     pub mtime: i64,
 }
@@ -62,6 +71,18 @@ pub struct Manifest {
     /// mtime merely moved (Claude rewrites a chat just by opening it).
     #[serde(default)]
     pub base: std::collections::BTreeMap<PathBuf, String>,
+    /// Per conversation: versions that were agreed on earlier and have since
+    /// been replaced. A copy that goes back to one of these is stale (Claude
+    /// wrote an old in-memory copy back), never a new edit.
+    #[serde(default)]
+    pub history: std::collections::BTreeMap<PathBuf, Vec<String>>,
+    /// Every organization folder (`<account>/<org>`) found, including empty
+    /// ones: each of them should hold every conversation.
+    #[serde(default)]
+    pub org_dirs: Vec<PathBuf>,
+    /// `scan::HASH_VERSION` the hashes above were computed with.
+    #[serde(default)]
+    pub hash_version: u32,
     /// Files skipped by this scan because they were still being written;
     /// a watcher should rescan shortly even if no new event arrives.
     #[serde(skip)]
@@ -104,6 +125,24 @@ impl Manifest {
 }
 
 impl FileEntry {
+    /// The sync key: the conversation's file name (`local_<chat>.json`). The
+    /// same conversation is the same file in every account and organization.
+    pub fn chat(&self) -> PathBuf {
+        PathBuf::from(self.file_path.file_name().unwrap_or_default())
+    }
+
+    /// True if this copy continued from `other`'s transcript.
+    pub fn continues(&self, other: &FileEntry) -> bool {
+        other.cli_session_id.as_ref().is_some_and(|c| {
+            self.cli_session_id.as_ref() != Some(c) && self.prior_cli_session_ids.contains(c)
+        })
+    }
+
+    /// The organization folder holding this file.
+    pub fn folder(&self) -> &Path {
+        self.file_path.parent().unwrap_or(&self.account_root)
+    }
+
     /// The organization folder this session lives in: the first path
     /// component below the account root (Claude nests
     /// `<account>/<organization>/local_<chat>.json`). None if the file sits

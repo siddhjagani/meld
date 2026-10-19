@@ -29,8 +29,8 @@ pub enum Command {
     Status,
     /// Show per-account differences (what sync would copy)
     Diff,
-    /// Make every account hold the same conversations: copy new ones,
-    /// spread the newest version, and delete what was deleted elsewhere
+    /// Make every account and organization hold the same conversations:
+    /// copy new ones and spread the latest version
     Sync {
         /// Show what would happen without writing anything
         #[arg(long)]
@@ -38,6 +38,10 @@ pub enum Command {
         /// Skip the pre-sync snapshot (not recommended)
         #[arg(long)]
         no_backup: bool,
+        /// Quit Claude first (it saves its state), sync, then reopen it so
+        /// it shows the synced conversations (macOS)
+        #[arg(long)]
+        restart_claude: bool,
     },
     /// Watch for changes and sync automatically
     Watch {

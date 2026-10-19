@@ -21,18 +21,36 @@ pub struct Config {
     pub max_full_snapshots: usize,
     /// File name patterns to ignore (exact basename match).
     pub ignore: Vec<String>,
-    /// Opt-in: a conversation deleted in one account is deleted in every
-    /// account.
-    pub propagate_deletes: bool,
-    /// Opt-in: when accounts hold different versions of a conversation, the
-    /// newest copy replaces the older ones (the replaced copies are backed up).
+    /// What happens to a conversation you delete in one account or
+    /// organization. Default: it comes back from the others.
+    pub deleted_chats: DeletedChats,
+    /// Older setting: `true` means `deleted_chats = "delete_everywhere"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub propagate_deletes: Option<bool>,
+    /// On by default: when accounts hold different versions of a conversation,
+    /// the copy that was edited replaces the others (the replaced copies are
+    /// backed up). Set to false to keep both versions as a conflict.
     pub propagate_updates: bool,
+}
+
+/// What a sync does with a conversation that was deleted somewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletedChats {
+    /// Copied back from the accounts that still have it (nothing is deleted).
+    #[default]
+    ComeBack,
+    /// Stays deleted in the organization you deleted it in; every other
+    /// account and organization keeps it.
+    StayDeletedHere,
+    /// Deleted in every account and organization (copies are backed up).
+    DeleteEverywhere,
 }
 
 /// The parts of the config that decide what a sync does.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
-    pub propagate_deletes: bool,
+    pub deletes: DeletedChats,
     pub propagate_updates: bool,
 }
 
@@ -45,8 +63,9 @@ impl Default for Config {
             max_snapshots: 200,
             max_full_snapshots: 10,
             ignore: vec![".DS_Store".into(), "desktop.ini".into(), "Thumbs.db".into()],
-            propagate_deletes: false,
-            propagate_updates: false,
+            deleted_chats: DeletedChats::ComeBack,
+            propagate_deletes: None,
+            propagate_updates: true,
         }
     }
 }
@@ -113,7 +132,11 @@ impl Config {
 
     pub fn policy(&self) -> Policy {
         Policy {
-            propagate_deletes: self.propagate_deletes,
+            deletes: if self.propagate_deletes == Some(true) {
+                DeletedChats::DeleteEverywhere
+            } else {
+                self.deleted_chats
+            },
             propagate_updates: self.propagate_updates,
         }
     }

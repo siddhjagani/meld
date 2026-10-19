@@ -1,4 +1,4 @@
-use meld::{accounts, backup, cli, config, diff, discover, errors, lock, logging, manifest, restore, scan, service, sync, watch};
+use meld::{accounts, backup, claude_app, cli, config, diff, discover, errors, lock, logging, manifest, restore, scan, service, sync, watch};
 
 use clap::Parser;
 use cli::{Cli, Command, ConfigAction, ServiceAction};
@@ -30,7 +30,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Scan => {
             let m = do_scan(&cfg)?;
             let unique: std::collections::BTreeSet<_> =
-                m.entries.iter().map(|e| &e.relative_path).collect();
+                m.entries.iter().map(|e| e.chat()).collect();
             logging::info(&format!(
                 "Found {} accounts with {}.",
                 m.account_roots.len(),
@@ -60,16 +60,18 @@ fn run(cli: Cli) -> Result<()> {
                 print_diff(&report);
             }
         }
-        Command::Sync { dry_run, no_backup } => {
+        Command::Sync { dry_run, no_backup, restart_claude } => {
             let _lock = lock::Lock::acquire(&cfg)?;
-            let roots = discover::discover_account_roots(&cfg)?;
-            let m = do_scan(&cfg)?;
-            let report = diff::compute(&m, cfg.policy());
-            sync::apply(&cfg, &report, dry_run, no_backup)?;
-            if !dry_run {
-                let m2 = scan::scan(&cfg, &roots, &m)?;
-                m2.save(&cfg.manifest_path())?;
+            let restart = restart_claude && !dry_run;
+            if restart {
+                claude_app::quit_and_wait()?;
             }
+            let result = sync_once(&cfg, dry_run, no_backup);
+            if restart {
+                // Reopen even if the sync failed, so the user isn't left without the app.
+                claude_app::launch()?;
+            }
+            result?;
         }
         Command::Watch { dry_run, no_backup } => {
             let _lock = lock::Lock::acquire(&cfg)?;
@@ -88,6 +90,29 @@ fn run(cli: Cli) -> Result<()> {
         Command::Service { action: ServiceAction::Uninstall } => service::uninstall()?,
         Command::Service { action: ServiceAction::Status } => service::status()?,
         Command::Doctor => doctor(&cfg)?,
+    }
+    Ok(())
+}
+
+/// One `meld sync`. Files written in the last moments (Claude saving, or
+/// just quit) are skipped by the scan; wait for them instead of leaving them
+/// out, so a sync right after using Claude includes the latest state.
+fn sync_once(cfg: &Config, dry_run: bool, no_backup: bool) -> Result<()> {
+    let roots = discover::discover_account_roots(cfg)?;
+    let mut m = do_scan(cfg)?;
+    for _ in 0..5 {
+        if m.skipped_recent == 0 {
+            break;
+        }
+        logging::verbose("waiting for files that are still being written...");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        m = do_scan(cfg)?;
+    }
+    let report = diff::compute(&m, cfg.policy());
+    sync::apply(cfg, &report, dry_run, no_backup)?;
+    if !dry_run {
+        let m2 = scan::scan(cfg, &roots, &m)?;
+        m2.save(&cfg.manifest_path())?;
     }
     Ok(())
 }
@@ -161,7 +186,7 @@ fn pluralize(n: usize, one: &str, many: &str) -> String {
 
 fn print_status(m: &Manifest, report: &diff::DiffReport) {
     let unique: std::collections::BTreeSet<_> =
-        m.entries.iter().map(|e| &e.relative_path).collect();
+        m.entries.iter().map(|e| e.chat()).collect();
     let views = accounts::build(m);
     let org_count: usize = views.iter().map(|a| a.orgs.len()).sum();
     println!(

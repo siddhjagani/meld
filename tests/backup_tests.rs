@@ -15,7 +15,7 @@ fn snapshot_and_restore_roundtrip() {
     let tmp = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     let root = tmp.path();
-    let file = root.join("acct-a/ws1/local_x.json");
+    let file = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_x.json");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, r#"{"sessionId":"x","v":"original"}"#).unwrap();
 
@@ -38,7 +38,7 @@ fn restore_does_not_delete_new_files() {
     let tmp = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     let root = tmp.path();
-    let old = root.join("acct-a/ws1/local_x.json");
+    let old = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_x.json");
     fs::create_dir_all(old.parent().unwrap()).unwrap();
     fs::write(&old, r#"{"sessionId":"x"}"#).unwrap();
 
@@ -47,7 +47,7 @@ fn restore_does_not_delete_new_files() {
     backup::snapshot(&cfg, &roots).unwrap();
 
     // A new file appears after the snapshot.
-    let new = root.join("acct-a/ws1/local_new.json");
+    let new = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_new.json");
     fs::write(&new, r#"{"sessionId":"new"}"#).unwrap();
 
     restore::restore(&cfg, None, false).unwrap();
@@ -59,7 +59,7 @@ fn full_snapshots_have_their_own_smaller_cap() {
     let tmp = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     let root = tmp.path();
-    let file = root.join("acct-a/ws1/local_x.json");
+    let file = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_x.json");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, r#"{"sessionId":"x"}"#).unwrap();
 
@@ -92,7 +92,7 @@ fn total_snapshot_cap_still_applies() {
     let tmp = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     let root = tmp.path();
-    let file = root.join("acct-a/ws1/local_x.json");
+    let file = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_x.json");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, r#"{"sessionId":"x"}"#).unwrap();
 
@@ -110,7 +110,7 @@ fn restore_can_use_a_full_snapshot_by_name() {
     let tmp = TempDir::new().unwrap();
     let state = TempDir::new().unwrap();
     let root = tmp.path();
-    let file = root.join("acct-a/ws1/local_x.json");
+    let file = root.join("acct-a/11111111-1111-4111-8111-111111111111/local_x.json");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, r#"{"sessionId":"x","v":"original"}"#).unwrap();
 

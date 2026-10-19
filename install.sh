@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Meld installer:  curl -fsSL https://raw.githubusercontent.com/siddhjagani/meld/main/install.sh | bash
-# Downloads the latest release binary for your Mac; falls back to building
-# from source with cargo if no prebuilt binary matches.
+# Downloads the latest release binary for your Mac. Never builds from source.
 set -euo pipefail
 
 REPO="${MELD_REPO:-siddhjagani/meld}"          # override with MELD_REPO=you/meld
@@ -20,24 +19,14 @@ case "$(uname -m)" in
   *)      fail "unsupported architecture: $(uname -m)" ;;
 esac
 
-LATEST_URL="https://api.github.com/repos/$REPO/releases/latest"
-ASSET_URL="$(curl -fsSL "$LATEST_URL" 2>/dev/null \
-  | grep -o "\"browser_download_url\": *\"[^\"]*meld-$TARGET.tar.gz\"" \
-  | head -1 | sed 's/.*"\(https[^"]*\)"/\1/' || true)"
+# Direct "latest" download link: no GitHub API call, so no API rate limit
+# (60/hour per IP, easily used up on shared networks).
+ASSET_URL="https://github.com/$REPO/releases/latest/download/meld-$TARGET.tar.gz"
 
-if [ -n "${ASSET_URL:-}" ]; then
-  say "downloading prebuilt binary ($TARGET)"
-  curl -fsSL "$ASSET_URL" -o "$TMP/meld.tar.gz"
-  tar -xzf "$TMP/meld.tar.gz" -C "$TMP"
-else
-  say "no prebuilt binary found — building from source"
-  command -v cargo >/dev/null 2>&1 \
-    || fail "cargo not found. Install Rust first: https://rustup.rs"
-  say "cloning $REPO"
-  git clone --depth 1 "https://github.com/$REPO" "$TMP/src"
-  (cd "$TMP/src" && cargo build --release)
-  cp "$TMP/src/target/release/meld" "$TMP/meld"
-fi
+say "downloading meld ($TARGET)"
+curl -fsSL "$ASSET_URL" -o "$TMP/meld.tar.gz" \
+  || fail "could not download $ASSET_URL — check your connection, or see https://github.com/$REPO/releases"
+tar -xzf "$TMP/meld.tar.gz" -C "$TMP"
 
 say "installing to $INSTALL_DIR/meld"
 if [ -w "$INSTALL_DIR" ]; then

@@ -8,19 +8,19 @@ $Repo = if ($env:MELD_REPO) { $env:MELD_REPO } else { "siddhjagani/meld" }
 $InstallDir = if ($env:MELD_INSTALL_DIR) { $env:MELD_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "meld\bin" }
 $Target = "x86_64-pc-windows-msvc"
 
-Write-Host "==> Finding the latest meld release..."
-$release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
-$asset = $release.assets | Where-Object { $_.name -eq "meld-$Target.zip" } | Select-Object -First 1
-if (-not $asset) {
-    Write-Error "No Windows build found in the latest release. Please report this at https://github.com/$Repo/issues"
-}
+# Direct "latest" download link: no GitHub API call, so no API rate limit.
+$AssetUrl = "https://github.com/$Repo/releases/latest/download/meld-$Target.zip"
 
 $tmp = Join-Path $env:TEMP "meld-install-$(Get-Random)"
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
-    Write-Host "==> Downloading meld $($release.tag_name)..."
+    Write-Host "==> Downloading the latest meld..."
     $zip = Join-Path $tmp "meld.zip"
-    Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+    try {
+        Invoke-WebRequest $AssetUrl -OutFile $zip
+    } catch {
+        Write-Error "No Windows build found in the latest release. Please report this at https://github.com/$Repo/issues"
+    }
 
     Write-Host "==> Installing to $InstallDir"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null

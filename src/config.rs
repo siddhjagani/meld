@@ -77,28 +77,137 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Platform default for the Claude Code desktop session store.
-fn default_sessions_root() -> PathBuf {
+/// The platform base for Claude's state: `%LOCALAPPDATA%` on Windows,
+/// `~/Library/Application Support` on macOS, `~/.config` elsewhere.
+fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        std::env::var("APPDATA")
+        std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"))
-            .join("Claude")
-            .join("claude-code-sessions")
+            .unwrap_or_else(|_| home_dir().join("AppData").join("Local"))
     }
     #[cfg(target_os = "macos")]
     {
-        home_dir().join("Library/Application Support/Claude/claude-code-sessions")
+        home_dir().join("Library/Application Support")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        home_dir().join(".config/Claude/claude-code-sessions")
+        home_dir().join(".config")
     }
+}
+
+/// First-party Claude install: `<app-data>/Claude/claude-code-sessions`.
+fn first_party_root() -> PathBuf {
+    app_data_dir().join("Claude").join("claude-code-sessions")
+}
+
+/// Third-party inference profile store: `<app-data>/Claude-3p/claude-code-sessions`.
+/// Cross-platform — exists on Windows (`%LOCALAPPDATA%\Claude-3p\`), macOS
+/// (`~/Library/Application Support/Claude-3p/`) and Linux alike.
+fn third_party_root() -> PathBuf {
+    app_data_dir().join("Claude-3p").join("claude-code-sessions")
+}
+
+/// True if the root holds at least one session file (`local_<chat>.json`).
+/// A directory that exists but only holds a stub (e.g. `profile-origin.json`)
+/// is not populated and must not shadow a populated store.
+fn has_sessions(root: &Path) -> bool {
+    let Ok(accounts) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for acct in accounts.flatten() {
+        let Ok(orgs) = std::fs::read_dir(acct.path()) else {
+            continue;
+        };
+        for org in orgs.flatten() {
+            let Ok(files) = std::fs::read_dir(org.path()) else {
+                continue;
+            };
+            if files.flatten().any(|f| {
+                f.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("local_") && n.ends_with(".json"))
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// All candidate session-store locations, most preferred first. meld scans
+/// every candidate it finds — a user can legitimately have history in both
+/// the first-party and third-party stores.
+fn candidates_sessions_roots() -> Vec<PathBuf> {
+    vec![first_party_root(), third_party_root()]
+}
+
+/// Platform default for the Claude Code desktop session store. Prefers the
+/// first candidate that actually holds session files, falls back to the first
+/// one that exists, then to the first-party path as a sensible default.
+fn default_sessions_root() -> PathBuf {
+    let candidates = candidates_sessions_roots();
+    for c in &candidates {
+        if has_sessions(c) {
+            return c.clone();
+        }
+    }
+    candidates
+        .iter()
+        .find(|c| c.exists())
+        .cloned()
+        .unwrap_or_else(first_party_root)
 }
 
 pub fn config_path() -> PathBuf {
     home_dir().join(".meld/config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("meld-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn default_sessions_root_prefers_populated_store() {
+        let base = tmp_dir("prefers_populated");
+
+        let first_party = base.join("first_party");
+        fs::create_dir_all(&first_party).unwrap();
+        // first-party is empty (stub only) — not populated
+        fs::write(first_party.join("profile-origin.json"), "{}").unwrap();
+        assert!(!has_sessions(&first_party));
+
+        let org_root = base.join("third_party").join("account").join("org");
+        fs::create_dir_all(&org_root).unwrap();
+        fs::write(org_root.join("local_x.json"), r#"{}"#).unwrap();
+        assert!(has_sessions(&org_root.parent().unwrap().parent().unwrap()));
+    }
+
+    #[test]
+    fn has_sessions_ignores_non_session_files() {
+        let base = tmp_dir("ignores_non_session");
+        let org = base.join("acct").join("org");
+        fs::create_dir_all(&org).unwrap();
+        fs::write(org.join("scheduled-tasks.json"), "[]").unwrap();
+        fs::write(org.join("deleted_x"), "marker").unwrap();
+        assert!(!has_sessions(&base));
+
+        fs::write(org.join("local_x.json"), r#"{}"#).unwrap();
+        assert!(has_sessions(&base));
+    }
+
+    #[test]
+    fn has_sessions_returns_false_for_missing_dir() {
+        assert!(!has_sessions(&tmp_dir("missing_dir").join("nope")));
+    }
 }
 
 impl Config {

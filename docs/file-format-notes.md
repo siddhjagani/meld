@@ -74,3 +74,27 @@ Single JSON object. Keys seen:
   absence is tolerated.
 - There is a sibling `local-agent-mode-sessions/` folder — intentionally NOT
   synced by meld (out of scope until its semantics are understood).
+
+## First-party vs third-party stores
+
+Claude stores its session data under two possible roots, and meld scans both
+(`config::default_sessions_root`):
+
+- **First-party (1P):** the plain Claude install, one store per platform
+  (e.g. `%APPDATA%\Claude\claude-code-sessions` on Windows,
+  `~/Library/Application Support/Claude/claude-code-sessions` on macOS).
+- **Third-party (3P):** Claude's inference profile store, next to the 1P root
+  (`.../Claude-3p/claude-code-sessions`). It exists on Windows, macOS and
+  Linux alike.
+
+Resolution order, most preferred first:
+
+1. The first candidate that actually holds `local_<chat>.json` session files
+   (a "populated" store — a stub holding only `profile-origin.json` is skipped).
+2. The first candidate that exists at all.
+3. The first-party path as a default.
+
+This means a user can legitimately have history in both stores and meld will
+index whichever one is populated, never silently shadowing a real store with an
+empty stub.
+

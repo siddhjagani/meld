@@ -49,7 +49,7 @@ fn lock_is_stale(path: &std::path::Path) -> bool {
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     // kill(pid, 0) checks process existence without signaling.
-    extern "C" {
+    unsafe extern "C" {
         #[link_name = "kill"]
         fn libc_kill(pid: i32, sig: i32) -> i32;
     }
@@ -59,7 +59,7 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_alive(pid: u32) -> bool {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    extern "system" {
+    unsafe extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     }

@@ -20,7 +20,7 @@ fn log_path() -> PathBuf {
 
 #[cfg(unix)]
 fn uid() -> u32 {
-    extern "C" {
+    unsafe extern "C" {
         fn getuid() -> u32;
     }
     unsafe { getuid() }

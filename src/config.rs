@@ -77,9 +77,9 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// The platform base for Claude's state: `%LOCALAPPDATA%` on Windows,
-/// `~/Library/Application Support` on macOS, `~/.config` elsewhere.
-fn app_data_dir() -> PathBuf {
+/// The per-user state base on Windows: `%LOCALAPPDATA%` (the `Local` folder).
+/// On macOS this is `~/Library/Application Support`, on Linux `~/.config`.
+fn local_app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         std::env::var("LOCALAPPDATA")
@@ -96,16 +96,25 @@ fn app_data_dir() -> PathBuf {
     }
 }
 
+/// The roaming per-user state base on Windows: `%APPDATA%`.
+/// Only defined on Windows; other platforms fall back to the local base.
+#[cfg(target_os = "windows")]
+fn roaming_app_data_dir() -> PathBuf {
+    std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"))
+}
+
 /// First-party Claude install: `<app-data>/Claude/claude-code-sessions`.
-fn first_party_root() -> PathBuf {
-    app_data_dir().join("Claude").join("claude-code-sessions")
+fn first_party_root(app_data: &Path) -> PathBuf {
+    app_data.join("Claude").join("claude-code-sessions")
 }
 
 /// Third-party inference profile store: `<app-data>/Claude-3p/claude-code-sessions`.
-/// Cross-platform — exists on Windows (`%LOCALAPPDATA%\Claude-3p\`), macOS
-/// (`~/Library/Application Support/Claude-3p/`) and Linux alike.
-fn third_party_root() -> PathBuf {
-    app_data_dir().join("Claude-3p").join("claude-code-sessions")
+/// Exists on Windows (`%LOCALAPPDATA%\Claude-3p\` and `%APPDATA%\Claude-3p\`),
+/// macOS (`~/Library/Application Support/Claude-3p/`) and Linux alike.
+fn third_party_root(app_data: &Path) -> PathBuf {
+    app_data.join("Claude-3p").join("claude-code-sessions")
 }
 
 /// True if the root holds at least one session file (`local_<chat>.json`).
@@ -135,16 +144,33 @@ fn has_sessions(root: &Path) -> bool {
     false
 }
 
-/// All candidate session-store locations, most preferred first. meld scans
+/// All candidate session-store locations, most preferred first.
+/// On Windows both `%LOCALAPPDATA%` and `%APPDATA%` are checked, first-party
+/// then third-party for each — so all four combos are covered. meld scans
 /// every candidate it finds — a user can legitimately have history in both
 /// the first-party and third-party stores.
 fn candidates_sessions_roots() -> Vec<PathBuf> {
-    vec![first_party_root(), third_party_root()]
+    #[cfg(target_os = "windows")]
+    {
+        let local = local_app_data_dir();
+        let roaming = roaming_app_data_dir();
+        vec![
+            first_party_root(&local),
+            third_party_root(&local),
+            first_party_root(&roaming),
+            third_party_root(&roaming),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = local_app_data_dir();
+        vec![first_party_root(&base), third_party_root(&base)]
+    }
 }
 
 /// Platform default for the Claude Code desktop session store. Prefers the
 /// first candidate that actually holds session files, falls back to the first
-/// one that exists, then to the first-party path as a sensible default.
+/// one that exists, then to the first-party local path as a sensible default.
 fn default_sessions_root() -> PathBuf {
     let candidates = candidates_sessions_roots();
     for c in &candidates {
@@ -156,7 +182,7 @@ fn default_sessions_root() -> PathBuf {
         .iter()
         .find(|c| c.exists())
         .cloned()
-        .unwrap_or_else(first_party_root)
+        .unwrap_or_else(|| first_party_root(&local_app_data_dir()))
 }
 
 pub fn config_path() -> PathBuf {

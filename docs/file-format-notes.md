@@ -87,12 +87,20 @@ Claude stores its session data under two possible roots, and meld scans both
   (`.../Claude-3p/claude-code-sessions`). It exists on Windows, macOS and
   Linux alike.
 
+On Windows both `%LOCALAPPDATA%` and `%APPDATA%` are checked — first-party then
+third-party for each — so all four combos are covered:
+
+1. `%LOCALAPPDATA%\Claude\claude-code-sessions` (1P)
+2. `%LOCALAPPDATA%\Claude-3p\claude-code-sessions` (3P)
+3. `%APPDATA%\Claude\claude-code-sessions` (1P)
+4. `%APPDATA%\Claude-3p\claude-code-sessions` (3P)
+
 Resolution order, most preferred first:
 
 1. The first candidate that actually holds `local_<chat>.json` session files
    (a "populated" store — a stub holding only `profile-origin.json` is skipped).
 2. The first candidate that exists at all.
-3. The first-party path as a default.
+3. The first-party local path as a default.
 
 This means a user can legitimately have history in both stores and meld will
 index whichever one is populated, never silently shadowing a real store with an

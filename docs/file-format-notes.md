@@ -44,7 +44,9 @@ handling a credential.
 `<sessions-root>` per platform (see `config::default_sessions_root`):
 
 - macOS:   `~/Library/Application Support/Claude/claude-code-sessions`
-- Windows: `%APPDATA%\Claude\claude-code-sessions`
+- Windows: `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions`
+  for the MSIX build (the claude.ai installer, Store and winget all install
+  it); `%APPDATA%\Claude\claude-code-sessions` for the older installer
 - Linux:   `~/.config/Claude/claude-code-sessions` (untested — no Linux desktop)
 
 Observed on this machine: 3 accounts; one of them nests 2 organizations
@@ -87,20 +89,43 @@ Claude stores its session data under two possible roots, and meld scans both
   (`.../Claude-3p/claude-code-sessions`). It exists on Windows, macOS and
   Linux alike.
 
-On Windows both `%LOCALAPPDATA%` and `%APPDATA%` are checked — first-party then
-third-party for each — so all four combos are covered:
+On Windows the current Claude build is an MSIX package. Windows redirects the
+packaged app's `%APPDATA%` / `%LOCALAPPDATA%` writes into
+`%LOCALAPPDATA%\Packages\Claude_<publisher-hash>\LocalCache\{Roaming,Local}`,
+which an unpackaged tool like meld does not see through `%APPDATA%` (verified
+via anthropics/claude-code#25579 and #26073; hash `pzs8sxrjxfjjc` today).
 
-1. `%LOCALAPPDATA%\Claude\claude-code-sessions` (1P)
-2. `%LOCALAPPDATA%\Claude-3p\claude-code-sessions` (3P)
-3. `%APPDATA%\Claude\claude-code-sessions` (1P)
-4. `%APPDATA%\Claude-3p\claude-code-sessions` (3P)
+Because that layout is observed, not documented, meld searches instead of
+assuming (`config::find_stores`): every `claude-code-sessions` folder inside a
+folder whose name contains `claude` or `anthropic` (any package hash or name,
+`LocalCache` or `LocalState`, `Claude`, `Claude-3p`, a beta channel, ...),
+bounded in depth so a large AppData stays fast:
 
-Resolution order, most preferred first:
+- `%LOCALAPPDATA%\Packages\<Claude-named>\…` — up to 5 levels down
+- `%APPDATA%\<Claude-named>\…` and `%LOCALAPPDATA%\<Claude-named>\…` — 2 levels
+- the same under `%USERPROFILE%\AppData`, in case `%APPDATA%` was overridden
 
-1. The first candidate that actually holds `local_<chat>.json` session files
-   (a "populated" store — a stub holding only `profile-origin.json` is skipped).
-2. The first candidate that exists at all.
-3. The first-party local path as a default.
+On macOS/Linux the same search runs over `~/Library/Application Support` /
+`~/.config`. Stores reached twice (junction/symlink) are counted once.
+
+Resolution (`config::pick_sessions_root`):
+
+1. Among stores holding `local_<chat>.json` files (a stub holding only
+   `profile-origin.json` doesn't count), the one with the most recently
+   written session — after a reinstall the old store lingers but stops
+   changing. Ties go to the earlier candidate.
+2. Otherwise the first store that exists at all.
+3. Otherwise where the installed build would create it (inside the Claude
+   package if one is installed, else `%APPDATA%\Claude\…`) — used for the
+   error message.
+
+`meld doctor` lists every store found with its conversation count and last
+write, marks the one in use, and warns when more than one holds
+conversations (meld syncs only one).
+
+A `sessions_root` pinned in `config.toml` wins, unless it doesn't exist —
+then meld warns and uses the detected store. `meld config init` writes it
+commented out so it isn't pinned by accident.
 
 This means a user can legitimately have history in both stores and meld will
 index whichever one is populated, never silently shadowing a real store with an

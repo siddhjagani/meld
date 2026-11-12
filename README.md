@@ -43,7 +43,10 @@ On Windows (PowerShell, no administrator needed):
 irm https://meld.dpdns.org/install.ps1 | iex
 ```
 
-macOS (Apple Silicon and Intel) and Windows are supported.
+macOS (Apple Silicon and Intel) and Windows are supported. On Windows meld
+finds sessions for both the current installer (an MSIX package, which keeps
+its data under `%LOCALAPPDATA%\Packages\Claude_…\LocalCache`) and the older
+one (`%APPDATA%\Claude`).
 
 ## Get started in three commands
 
@@ -110,9 +113,10 @@ while it is open don't show up by themselves. Any of these makes it reload:
   re-reads the list and shows newly synced chats. A chat that was already
   open keeps the version Claude has in memory.
 - **`meld sync --restart-claude`** quits Claude (so it saves first), syncs,
-  and reopens it. This always gives you the exact latest state.
+  and reopens it. This always gives you the exact latest state (macOS; on
+  Windows, quit Claude from its tray icon and reopen it).
 
-## Run it in the background (macOS)
+## Run it in the background
 
 ```bash
 meld service install     # start background sync now and at every login
@@ -121,7 +125,9 @@ meld service uninstall   # turn it off
 ```
 
 This runs `meld watch` as a login item, restarts it if it stops, and logs to
-`~/Library/Logs/meld.log`. While it runs, `meld sync` isn't needed (and
+`~/Library/Logs/meld.log` (macOS) or `%USERPROFILE%\.meld\meld.log`
+(Windows, where it runs hidden — no console window — and shows up under
+Startup apps in Task Manager). While it runs, `meld sync` isn't needed (and
 `meld restore` asks you to turn the service off first).
 
 ## Check where things stand
@@ -225,7 +231,7 @@ meld config show     # view current settings
 | `meld diff` | List exactly what a sync would copy |
 | `meld backup` | Save a snapshot now |
 | `meld restore` | Roll back to the newest snapshot (`--list` to see all) |
-| `meld service install` | Sync in the background at every login (macOS) |
+| `meld service install` | Sync in the background at every login |
 | `meld service uninstall` | Turn background sync off |
 | `meld doctor` | Verify folders and permissions are healthy |
 | `meld scan` | Rebuild meld's index of your sessions |

@@ -32,11 +32,16 @@ Read `context.md` first for current state and decisions.
   size+mtime unchanged) → `diff` (union-mirror plan) → `sync` (apply).
 - `watch` re-runs the whole pipeline after a debounced event burst.
 - State in `~/.meld/` (`config.toml`, `manifest.json`, `backups/`, `meld.lock`).
-- Cross-platform (macOS + Windows): session-root default is per-OS in
-  `config.rs`; `lock.rs` has cfg(unix)/cfg(windows) process-alive checks
-  (no libc crate — tiny extern shims); mtime preservation uses the
-  `filetime` crate; renames over existing files must go through
-  `manifest::replace_file` (Windows can't rename onto an existing file).
+- Cross-platform (macOS + Windows): session-root detection in `config.rs`
+  searches (bounded depth, Claude/Anthropic-named folders only) for every
+  `claude-code-sessions` store — on Windows including MSIX package folders
+  (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`) — and the store with the
+  newest session file wins (`meld doctor` lists them all); a configured `sessions_root` that doesn't exist
+  falls back to detection. `lock.rs` has cfg(unix)/cfg(windows) process-alive
+  checks (no libc crate — tiny extern shims); mtime preservation uses the
+  `filetime` crate; renames over existing files go through
+  `manifest::replace_file` (atomic replace everywhere; retries transient
+  Windows sharing violations from antivirus/indexer).
 
 ## Gotchas
 

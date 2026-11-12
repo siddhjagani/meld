@@ -86,9 +86,10 @@ fn run(cli: Cli) -> Result<()> {
             let _lock = lock::Lock::acquire(&cfg)?;
             restore::restore(&cfg, snapshot.as_deref(), dry_run)?;
         }
-        Command::Service { action: ServiceAction::Install } => service::install()?,
-        Command::Service { action: ServiceAction::Uninstall } => service::uninstall()?,
-        Command::Service { action: ServiceAction::Status } => service::status()?,
+        Command::Service { action: ServiceAction::Install } => service::install(&cfg)?,
+        Command::Service { action: ServiceAction::Uninstall } => service::uninstall(&cfg)?,
+        Command::Service { action: ServiceAction::Status } => service::status(&cfg)?,
+        Command::Service { action: ServiceAction::Run } => service::run(&cfg)?,
         Command::Doctor => doctor(&cfg)?,
     }
     Ok(())
@@ -293,6 +294,39 @@ fn print_status_json(m: &Manifest, report: &diff::DiffReport) -> Result<()> {
     Ok(())
 }
 
+/// Every Claude session store on this machine, the one in use marked →.
+/// Claude can leave more than one behind (old installer vs the Windows MSIX
+/// package, first- vs third-party), and meld syncs only one of them.
+fn print_session_stores(cfg: &Config) {
+    let stores = config::session_stores();
+    if stores.is_empty() {
+        return;
+    }
+    let same = |a: &std::path::Path| {
+        std::fs::canonicalize(a).ok() == std::fs::canonicalize(&cfg.sessions_root).ok()
+    };
+    let now = chrono::Utc::now().timestamp();
+    println!("  Session folders found:");
+    for (root, n, latest) in &stores {
+        let secs = latest
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        let what = if *n == 0 {
+            "empty".to_string()
+        } else {
+            format!("{}, last saved {}", sync::conversations(*n), accounts::humanize_age(secs, now))
+        };
+        println!("  {} {} ({what})", if same(root) { "→" } else { " " }, root.display());
+    }
+    if stores.iter().filter(|(_, n, _)| *n > 0).count() > 1 {
+        println!(
+            "! More than one folder holds conversations; meld syncs the one marked →. \
+             To use another, set `sessions_root` in {}.",
+            config::config_path().display()
+        );
+    }
+}
+
 fn doctor(cfg: &Config) -> Result<()> {
     let mut ok = true;
     let check = |pass: bool, msg: &str| {
@@ -303,13 +337,16 @@ fn doctor(cfg: &Config) -> Result<()> {
     let found = cfg.sessions_root.exists();
     ok &= check(
         found,
-        if found {
-            "Claude Code is installed and has session data"
+        &if found {
+            format!("Claude Code session data found in {}", cfg.sessions_root.display())
         } else {
-            "Could not find Claude Code session data — is the desktop app installed?"
+            format!(
+                "Could not find Claude Code session data (looked in {}) — is the desktop app installed, and have you started a Claude Code session in it?",
+                cfg.sessions_root.display()
+            )
         },
     );
-    logging::verbose(&format!("sessions root: {}", cfg.sessions_root.display()));
+    print_session_stores(cfg);
 
     if found {
         match discover::discover_account_roots(cfg) {

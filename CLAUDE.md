@@ -52,14 +52,21 @@ Read `context.md` first for current state and decisions.
   trees (e.g. `scheduled-tasks.json`) are per-account and never synced.
 - Full snapshots (`meld backup`, copy-only syncs; name ends `-full`) have their
   own cap `max_full_snapshots`; per-file snapshots use `max_snapshots`.
-- `service` installs `meld watch` as the `com.meld.watch` LaunchAgent (macOS).
+- `service` installs `meld watch` as the `com.meld.watch` LaunchAgent (macOS),
+  or on Windows as an `HKCU\...\Run` entry starting `conhost --headless meld
+  service run` (hidden supervisor: restarts `watch`, logs to `~/.meld/meld.log`).
 - `watch` re-runs the whole pipeline after a debounced event burst.
 - State in `~/.meld/` (`config.toml`, `manifest.json`, `backups/`, `meld.lock`).
-- Cross-platform (macOS + Windows): session-root default is per-OS in
-  `config.rs`; `lock.rs` has cfg(unix)/cfg(windows) process-alive checks
-  (no libc crate — tiny extern shims); mtime preservation uses the
-  `filetime` crate; renames over existing files must go through
-  `manifest::replace_file` (Windows can't rename onto an existing file).
+- Cross-platform (macOS + Windows): session-root detection in `config.rs`
+  searches (bounded depth, Claude/Anthropic-named folders only) for every
+  `claude-code-sessions` store — on Windows including MSIX package folders
+  (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`) — and the store with the
+  newest session file wins (`meld doctor` lists them all); a configured `sessions_root` that doesn't exist
+  falls back to detection. `lock.rs` has cfg(unix)/cfg(windows) process-alive
+  checks (no libc crate — tiny extern shims); mtime preservation uses the
+  `filetime` crate; renames over existing files go through
+  `manifest::replace_file` (atomic replace everywhere; retries transient
+  Windows sharing violations from antivirus/indexer).
 
 ## Gotchas
 

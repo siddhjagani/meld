@@ -2,6 +2,7 @@ use crate::errors::Result;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Meld configuration. Lives at ~/.meld/config.toml; every field has a
 /// sensible default so the tool works with no config file at all.
@@ -77,52 +78,135 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// The per-user state base on Windows: `%LOCALAPPDATA%` (the `Local` folder).
-/// On macOS this is `~/Library/Application Support`, on Linux `~/.config`.
-fn local_app_data_dir() -> PathBuf {
+/// True for folder names that can belong to Claude: `Claude`, `Claude-3p`,
+/// a beta channel, the MSIX package `Claude_<hash>`, `AnthropicClaude`, ...
+fn claude_named(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|n| {
+        let n = n.to_ascii_lowercase();
+        n.contains("claude") || n.contains("anthropic")
+    })
+}
+
+/// Every `claude-code-sessions` folder inside a Claude-named child of
+/// `base`, at most `depth` levels below `base`. Searched instead of assumed,
+/// so a different package hash, a `LocalState` folder or another channel is
+/// still found; bounded and limited to Claude-named folders so a large
+/// AppData stays fast. Sorted, so the order is stable.
+fn find_stores(base: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut walk = walkdir::WalkDir::new(base)
+        .min_depth(1)
+        .max_depth(depth)
+        .follow_links(true) // a junctioned AppData folder still counts
+        .sort_by_file_name()
+        .into_iter();
+    while let Some(entry) = walk.next() {
+        let Ok(e) = entry else { continue };
+        if !e.file_type().is_dir() {
+            continue;
+        }
+        if e.depth() == 1 && !claude_named(e.file_name()) {
+            walk.skip_current_dir();
+        } else if e.file_name() == "claude-code-sessions" {
+            found.push(e.into_path());
+            walk.skip_current_dir();
+        }
+    }
+    found
+}
+
+/// Windows candidates, given `%LOCALAPPDATA%` and `%APPDATA%`.
+///
+/// The installer from claude.ai, the Microsoft Store and winget all install
+/// Claude as an MSIX package, and Windows silently redirects the packaged
+/// app's `%APPDATA%` / `%LOCALAPPDATA%` writes into
+/// `%LOCALAPPDATA%\Packages\Claude_<publisher-hash>\LocalCache\{Roaming,Local}`
+/// (`<pkg>\LocalCache\Roaming\Claude\claude-code-sessions`: 5 levels down).
+/// meld is not packaged, so it has to look there itself. The older non-MSIX
+/// installer used the real `%APPDATA%` / `%LOCALAPPDATA%`. If no store is
+/// found, the only entry is where the installed build would create one (for
+/// the error message).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_candidates(local: &Path, roaming: &Path) -> Vec<PathBuf> {
+    let packages = local.join("Packages");
+    let mut c = find_stores(&packages, 5);
+    c.extend(find_stores(roaming, 2));
+    c.extend(find_stores(local, 2));
+    if !c.is_empty() {
+        return c;
+    }
+    // Prefer the known `Claude_<hash>` package name over other Claude-named ones.
+    let package = std::fs::read_dir(&packages).ok().and_then(|d| {
+        d.flatten()
+            .filter(|e| claude_named(&e.file_name()))
+            .map(|e| e.path())
+            .min_by_key(|p| {
+                let n = p.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                (!n.starts_with("claude_"), n)
+            })
+    });
+    c.push(match package {
+        Some(p) => p.join("LocalCache").join("Roaming").join("Claude").join("claude-code-sessions"),
+        None => roaming.join("Claude").join("claude-code-sessions"),
+    });
+    c
+}
+
+/// Drop repeats, including one store reached twice through a junction or
+/// symlink (canonical path), keeping the first spelling.
+fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = Vec::new();
+    paths
+        .into_iter()
+        .filter(|p| {
+            let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            let new = !seen.contains(&key);
+            if new {
+                seen.push(key);
+            }
+            new
+        })
+        .collect()
+}
+
+/// Every place Claude may keep its session store on this platform: the
+/// stores found first, then the default location. Never empty.
+fn candidates_sessions_roots() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
-    {
-        std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir().join("AppData").join("Local"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        home_dir().join("Library/Application Support")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        home_dir().join(".config")
-    }
+    let c = {
+        let profile = home_dir().join("AppData");
+        let dir = |var: &str, fallback: &str| {
+            std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| profile.join(fallback))
+        };
+        let mut c = windows_candidates(&dir("LOCALAPPDATA", "Local"), &dir("APPDATA", "Roaming"));
+        // %APPDATA% can be overridden in a shell (MCP setups do this):
+        // also look in the profile's own AppData.
+        c.extend(windows_candidates(&profile.join("Local"), &profile.join("Roaming")));
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let c = {
+        let base = if cfg!(target_os = "macos") {
+            home_dir().join("Library/Application Support")
+        } else {
+            home_dir().join(".config")
+        };
+        let mut c = find_stores(&base, 2);
+        c.push(base.join("Claude").join("claude-code-sessions"));
+        c
+    };
+    dedup(c)
 }
 
-/// The roaming per-user state base on Windows: `%APPDATA%`.
-/// Only defined on Windows; other platforms fall back to the local base.
-#[cfg(target_os = "windows")]
-fn roaming_app_data_dir() -> PathBuf {
-    std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"))
-}
-
-/// First-party Claude install: `<app-data>/Claude/claude-code-sessions`.
-fn first_party_root(app_data: &Path) -> PathBuf {
-    app_data.join("Claude").join("claude-code-sessions")
-}
-
-/// Third-party inference profile store: `<app-data>/Claude-3p/claude-code-sessions`.
-/// Exists on Windows (`%LOCALAPPDATA%\Claude-3p\` and `%APPDATA%\Claude-3p\`),
-/// macOS (`~/Library/Application Support/Claude-3p/`) and Linux alike.
-fn third_party_root(app_data: &Path) -> PathBuf {
-    app_data.join("Claude-3p").join("claude-code-sessions")
-}
-
-/// True if the root holds at least one session file (`local_<chat>.json`).
-/// A directory that exists but only holds a stub (e.g. `profile-origin.json`)
-/// is not populated and must not shadow a populated store.
-fn has_sessions(root: &Path) -> bool {
+/// Unique conversations (`local_<chat>.json` names) under
+/// `<root>/<account>/<org>/`, and when the newest was written. A store that
+/// only holds a stub (e.g. `profile-origin.json`) has none and must not
+/// shadow a populated one.
+fn session_stats(root: &Path) -> (usize, Option<SystemTime>) {
+    let mut chats = std::collections::HashSet::new();
+    let mut latest = None;
     let Ok(accounts) = std::fs::read_dir(root) else {
-        return false;
+        return (0, None);
     };
     for acct in accounts.flatten() {
         let Ok(orgs) = std::fs::read_dir(acct.path()) else {
@@ -132,57 +216,51 @@ fn has_sessions(root: &Path) -> bool {
             let Ok(files) = std::fs::read_dir(org.path()) else {
                 continue;
             };
-            if files.flatten().any(|f| {
-                f.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("local_") && n.ends_with(".json"))
-            }) {
-                return true;
+            for f in files.flatten() {
+                let name = f.file_name();
+                let Some(n) = name.to_str() else { continue };
+                if n.starts_with("local_") && n.ends_with(".json") {
+                    let t = f.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+                    latest = latest.max(Some(t));
+                    chats.insert(name);
+                }
             }
         }
     }
-    false
+    (chats.len(), latest)
 }
 
-/// All candidate session-store locations, most preferred first.
-/// On Windows both `%LOCALAPPDATA%` and `%APPDATA%` are checked, first-party
-/// then third-party for each — so all four combos are covered. meld scans
-/// every candidate it finds — a user can legitimately have history in both
-/// the first-party and third-party stores.
-fn candidates_sessions_roots() -> Vec<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        let local = local_app_data_dir();
-        let roaming = roaming_app_data_dir();
-        vec![
-            first_party_root(&local),
-            third_party_root(&local),
-            first_party_root(&roaming),
-            third_party_root(&roaming),
-        ]
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let base = local_app_data_dir();
-        vec![first_party_root(&base), third_party_root(&base)]
-    }
+/// Every session store on this machine that exists, with its number of
+/// conversations and newest write (for `meld doctor`).
+pub fn session_stores() -> Vec<(PathBuf, usize, Option<SystemTime>)> {
+    candidates_sessions_roots()
+        .into_iter()
+        .filter(|c| c.is_dir())
+        .map(|c| {
+            let (n, t) = session_stats(&c);
+            (c, n, t)
+        })
+        .collect()
 }
 
-/// Platform default for the Claude Code desktop session store. Prefers the
-/// first candidate that actually holds session files, falls back to the first
-/// one that exists, then to the first-party local path as a sensible default.
-fn default_sessions_root() -> PathBuf {
-    let candidates = candidates_sessions_roots();
-    for c in &candidates {
-        if has_sessions(c) {
-            return c.clone();
-        }
-    }
+/// The store Claude uses now: the populated candidate with the most recently
+/// written conversation (after a reinstall — say the old installer replaced
+/// by the MSIX one — the old store lingers but stops changing; ties go to the
+/// earlier candidate). Otherwise the first candidate that exists at all.
+fn pick_sessions_root(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates
         .iter()
-        .find(|c| c.exists())
-        .cloned()
-        .unwrap_or_else(|| first_party_root(&local_app_data_dir()))
+        .rev() // max_by_key keeps the last of equal maxima
+        .filter_map(|c| session_stats(c).1.map(|t| (t, c)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, c)| c.clone())
+        .or_else(|| candidates.iter().find(|c| c.exists()).cloned())
+}
+
+/// Platform default for the Claude Code desktop session store.
+fn default_sessions_root() -> PathBuf {
+    let candidates = candidates_sessions_roots();
+    pick_sessions_root(&candidates).unwrap_or_else(|| candidates[0].clone())
 }
 
 pub fn config_path() -> PathBuf {
@@ -201,38 +279,106 @@ mod tests {
         d
     }
 
-    #[test]
-    fn default_sessions_root_prefers_populated_store() {
-        let base = tmp_dir("prefers_populated");
-
-        let first_party = base.join("first_party");
-        fs::create_dir_all(&first_party).unwrap();
-        // first-party is empty (stub only) — not populated
-        fs::write(first_party.join("profile-origin.json"), "{}").unwrap();
-        assert!(!has_sessions(&first_party));
-
-        let org_root = base.join("third_party").join("account").join("org");
-        fs::create_dir_all(&org_root).unwrap();
-        fs::write(org_root.join("local_x.json"), r#"{}"#).unwrap();
-        assert!(has_sessions(&org_root.parent().unwrap().parent().unwrap()));
+    /// Write `<root>/acct/org/local_<chat>.json` with the given mtime.
+    fn session(root: &Path, chat: &str, mtime: i64) {
+        let org = root.join("acct").join("org");
+        fs::create_dir_all(&org).unwrap();
+        let f = org.join(format!("local_{chat}.json"));
+        fs::write(&f, "{}").unwrap();
+        filetime::set_file_mtime(&f, filetime::FileTime::from_unix_time(mtime, 0)).unwrap();
     }
 
     #[test]
-    fn has_sessions_ignores_non_session_files() {
-        let base = tmp_dir("ignores_non_session");
+    fn stub_only_store_does_not_shadow_populated_one() {
+        let base = tmp_dir("prefers_populated");
+        let stub = base.join("stub");
+        fs::create_dir_all(&stub).unwrap();
+        fs::write(stub.join("profile-origin.json"), "{}").unwrap();
+        let real = base.join("real");
+        session(&real, "x", 1_000);
+        assert_eq!(pick_sessions_root(&[stub.clone(), real.clone()]), Some(real));
+        // Nothing populated: the first candidate that exists.
+        let missing = base.join("missing");
+        assert_eq!(pick_sessions_root(&[missing, stub.clone()]), Some(stub));
+    }
+
+    #[test]
+    fn newest_store_wins_and_ties_go_to_the_first() {
+        let base = tmp_dir("newest_wins");
+        let (old, new) = (base.join("old"), base.join("new"));
+        session(&old, "x", 1_000);
+        session(&new, "x", 2_000);
+        assert_eq!(pick_sessions_root(&[old.clone(), new.clone()]), Some(new.clone()));
+        session(&old, "x", 2_000);
+        assert_eq!(pick_sessions_root(&[old.clone(), new]), Some(old));
+    }
+
+    #[test]
+    fn session_stats_counts_unique_chats_only() {
+        let base = tmp_dir("stats");
         let org = base.join("acct").join("org");
         fs::create_dir_all(&org).unwrap();
         fs::write(org.join("scheduled-tasks.json"), "[]").unwrap();
         fs::write(org.join("deleted_x"), "marker").unwrap();
-        assert!(!has_sessions(&base));
+        assert_eq!(session_stats(&base), (0, None));
+        assert_eq!(session_stats(&base.join("nope")), (0, None));
 
-        fs::write(org.join("local_x.json"), r#"{}"#).unwrap();
-        assert!(has_sessions(&base));
+        session(&base, "x", 1_000);
+        session(&base, "y", 3_000);
+        let org2 = base.join("acct").join("org2");
+        fs::create_dir_all(&org2).unwrap();
+        fs::copy(org.join("local_x.json"), org2.join("local_x.json")).unwrap();
+        let (n, latest) = session_stats(&base);
+        assert_eq!(n, 2, "the same chat in two orgs is one conversation");
+        assert!(latest.is_some());
     }
 
     #[test]
-    fn has_sessions_returns_false_for_missing_dir() {
-        assert!(!has_sessions(&tmp_dir("missing_dir").join("nope")));
+    fn windows_search_finds_stores_wherever_the_package_puts_them() {
+        let base = tmp_dir("msix");
+        let (local, roaming) = (base.join("Local"), base.join("Roaming"));
+        let pkgs = local.join("Packages");
+        // Fresh MSIX install, no sessions yet: the default is inside the
+        // package, even with another Claude-named package sorting first.
+        fs::create_dir_all(pkgs.join("Claude_pzs8sxrjxfjjc").join("LocalCache")).unwrap();
+        fs::create_dir_all(pkgs.join("Anthropic.Claude_1234abcd")).unwrap();
+        let c = windows_candidates(&local, &roaming);
+        let pkg = pkgs.join("Claude_pzs8sxrjxfjjc");
+        let msix = pkg.join("LocalCache").join("Roaming").join("Claude").join("claude-code-sessions");
+        assert_eq!(c, vec![msix.clone()]);
+
+        // Stores in the usual place, under another hash, in LocalState, a
+        // 3P/beta channel and the old installer's folder are all found.
+        let other = pkgs.join("Anthropic.Claude_1234abcd").join("LocalState").join("claude-code-sessions");
+        let beta = local.join("Claude Beta").join("claude-code-sessions");
+        let old = roaming.join("Claude").join("claude-code-sessions");
+        let p3 = pkg.join("LocalCache").join("Local").join("Claude-3p").join("claude-code-sessions");
+        // Not Claude's: never searched.
+        let unrelated = pkgs.join("Microsoft.WindowsTerminal_8wekyb3d8bbwe").join("LocalState").join("claude-code-sessions");
+        for d in [&msix, &other, &beta, &old, &p3, &unrelated] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let c = windows_candidates(&local, &roaming);
+        for d in [&msix, &other, &beta, &old, &p3] {
+            assert!(c.contains(d), "missing {}", d.display());
+        }
+        assert!(!c.contains(&unrelated));
+        assert_eq!(c.len(), 5, "no default entry once stores are found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dedup_merges_a_store_reached_through_a_link() {
+        let base = tmp_dir("dedup_link");
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let missing = base.join("missing");
+        assert_eq!(
+            dedup(vec![real.clone(), link, missing.clone(), missing.clone()]),
+            vec![real, missing]
+        );
     }
 }
 
@@ -243,8 +389,23 @@ impl Config {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading config {}", path.display()))?;
-            let cfg: Config = toml::from_str(&raw)
+            let mut cfg: Config = toml::from_str(&raw)
                 .with_context(|| format!("parsing config {}", path.display()))?;
+            // A pinned folder that no longer exists (e.g. Claude reinstalled as
+            // the Windows MSIX package, which stores sessions elsewhere) can't
+            // work; use the detected store instead of failing every run.
+            if !cfg.sessions_root.exists() {
+                let detected = default_sessions_root();
+                if detected.exists() {
+                    crate::logging::warn(&format!(
+                        "sessions_root {} (set in {}) does not exist; using {} instead",
+                        cfg.sessions_root.display(),
+                        path.display(),
+                        detected.display()
+                    ));
+                    cfg.sessions_root = detected;
+                }
+            }
             Ok(cfg)
         } else {
             Ok(Config::default())
@@ -261,7 +422,10 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let cfg = Config::default();
-        std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
+        // Leave the sessions folder to auto-detection (commented out) so a
+        // reinstall that moves it doesn't leave a stale path pinned.
+        let body = toml::to_string_pretty(&cfg)?.replacen("sessions_root =", "# sessions_root =", 1);
+        std::fs::write(&path, body)?;
         Ok(path)
     }
 

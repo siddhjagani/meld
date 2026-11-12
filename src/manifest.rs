@@ -157,13 +157,21 @@ impl FileEntry {
     }
 }
 
-/// Rename `tmp` over `dest`, replacing it if present. On unix this is a
-/// plain atomic rename; Windows refuses to rename over an existing file,
-/// so the old file is removed first (the data is already safe in `tmp`).
+/// Rename `tmp` over `dest`, replacing it atomically if present
+/// (`std::fs::rename` uses `MOVEFILE_REPLACE_EXISTING` on Windows, so `dest`
+/// never goes missing). On Windows a just-written file is often held open
+/// for a moment by antivirus or the search indexer, which fails the rename
+/// with access-denied / sharing-violation: retry those briefly.
 pub fn replace_file(tmp: &Path, dest: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    if dest.exists() {
-        std::fs::remove_file(dest)?;
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(tmp, dest) {
+            // 5 = ERROR_ACCESS_DENIED, 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION
+            Err(e) if cfg!(windows) && tries < 20 && matches!(e.raw_os_error(), Some(5 | 32 | 33)) => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r,
+        }
     }
-    std::fs::rename(tmp, dest)
 }

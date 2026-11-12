@@ -63,7 +63,7 @@ pub enum Command {
         #[arg(long)]
         list: bool,
     },
-    /// Run `meld watch` in the background at login (macOS)
+    /// Run `meld watch` in the background at login (macOS, Windows)
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -85,6 +85,9 @@ pub enum ServiceAction {
     Uninstall,
     /// Show whether background sync is running
     Status,
+    /// The background process started at sign-in (Windows; internal)
+    #[command(hide = true)]
+    Run,
 }
 
 #[derive(Subcommand, Debug)]

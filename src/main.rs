@@ -294,43 +294,71 @@ fn print_status_json(m: &Manifest, report: &diff::DiffReport) -> Result<()> {
     Ok(())
 }
 
+/// Pass/fail marks for `meld doctor`. The default Windows console fonts have
+/// no ✓/✗ (they print as boxes), so Windows gets plain ASCII.
+const OK: &str = if cfg!(windows) { "[ok]" } else { "✓" };
+const FAIL: &str = if cfg!(windows) { "[x]" } else { "✗" };
+
+/// "3 conversations, last saved 2h ago" / "empty".
+fn describe_store(n: usize, latest: Option<std::time::SystemTime>, now: i64) -> String {
+    if n == 0 {
+        return "empty".into();
+    }
+    let secs = latest
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64);
+    format!("{}, last saved {}", sync::conversations(n), accounts::humanize_age(secs, now))
+}
+
 /// Every Claude session store on this machine, the one in use marked →.
 /// Claude can leave more than one behind (old installer vs the Windows MSIX
-/// package, first- vs third-party), and meld syncs only one of them.
+/// package, first- vs third-party), and meld syncs only one of them. Also
+/// lists folders that look like a store under another name (an older
+/// build's `local-agent-mode-sessions`), which meld never picks by itself.
 fn print_session_stores(cfg: &Config) {
-    let stores = config::session_stores();
-    if stores.is_empty() {
-        return;
-    }
     let same = |a: &std::path::Path| {
         std::fs::canonicalize(a).ok() == std::fs::canonicalize(&cfg.sessions_root).ok()
     };
     let now = chrono::Utc::now().timestamp();
-    println!("  Session folders found:");
-    for (root, n, latest) in &stores {
-        let secs = latest
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs() as i64);
-        let what = if *n == 0 {
-            "empty".to_string()
-        } else {
-            format!("{}, last saved {}", sync::conversations(*n), accounts::humanize_age(secs, now))
-        };
-        println!("  {} {} ({what})", if same(root) { "→" } else { " " }, root.display());
+    let stores = config::session_stores();
+    if !stores.is_empty() {
+        println!("  Session folders found:");
+        for (root, n, latest) in &stores {
+            let mark = if same(root) { "→" } else { " " };
+            println!("  {mark} {} ({})", root.display(), describe_store(*n, *latest, now));
+        }
     }
-    if stores.iter().filter(|(_, n, _)| *n > 0).count() > 1 {
+    let populated = stores.iter().filter(|(_, n, _)| *n > 0).count();
+    if populated > 1 {
         println!(
             "! More than one folder holds conversations; meld syncs the one marked →. \
              To use another, set `sessions_root` in {}.",
             config::config_path().display()
         );
     }
+    let lookalikes: Vec<_> = config::lookalike_stores()
+        .into_iter()
+        .filter(|(_, n, _)| *n > 0)
+        .collect();
+    if !lookalikes.is_empty() {
+        println!("  Other folders laid out like session folders (not used automatically):");
+        for (root, n, latest) in &lookalikes {
+            println!("    {} ({})", root.display(), describe_store(*n, *latest, now));
+        }
+        if populated == 0 {
+            println!(
+                "! If your Claude Code sessions are in one of these, add this line to {}:\n    sessions_root = '{}'",
+                config::config_path().display(),
+                lookalikes[0].0.display()
+            );
+        }
+    }
 }
 
 fn doctor(cfg: &Config) -> Result<()> {
     let mut ok = true;
     let check = |pass: bool, msg: &str| {
-        println!("{} {msg}", if pass { "✓" } else { "✗" });
+        println!("{} {msg}", if pass { OK } else { FAIL });
         pass
     };
 
@@ -396,7 +424,7 @@ fn doctor(cfg: &Config) -> Result<()> {
     let snaps = backup::list_snapshots(cfg)?.len();
     if snaps > 0 {
         println!(
-            "✓ {snaps} backup{} available (undo any sync with `meld restore`)",
+            "{OK} {snaps} backup{} available (undo any sync with `meld restore`)",
             if snaps == 1 { "" } else { "s" }
         );
     }

@@ -44,9 +44,15 @@ handling a credential.
 `<sessions-root>` per platform (see `config::default_sessions_root`):
 
 - macOS:   `~/Library/Application Support/Claude/claude-code-sessions`
-- Windows: `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions`
-  for the MSIX build (the claude.ai installer, Store and winget all install
-  it); `%APPDATA%\Claude\claude-code-sessions` for the older installer
+- Windows, current MSIX build (verified 2026-11-12 on Claude 5.1231.2.0,
+  package `Claude_pzs8sxrjxfjjc`):
+  `%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc\claude-code-sessions` —
+  outside the package container, under the lower-cased package family name
+  (the bundled Claude Code CLI lives next to it in `claude-code\<version>\`).
+  The package's own `LocalCache\Roaming\Claude` existed but was empty.
+- Windows, earlier MSIX builds:
+  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions`
+- Windows, old non-MSIX installer: `%APPDATA%\Claude\claude-code-sessions`
 - Linux:   `~/.config/Claude/claude-code-sessions` (untested — no Linux desktop)
 
 Observed on this machine: 3 accounts; one of them nests 2 organizations
@@ -102,11 +108,21 @@ folder whose name contains `claude` or `anthropic` (any package hash or name,
 bounded in depth so a large AppData stays fast:
 
 - `%LOCALAPPDATA%\Packages\<Claude-named>\…` — up to 5 levels down
-- `%APPDATA%\<Claude-named>\…` and `%LOCALAPPDATA%\<Claude-named>\…` — 2 levels
+- `%LOCALAPPDATA%\<Claude-named>\…` and `%APPDATA%\<Claude-named>\…` — 3
+  levels (covers `Claude-Data\claude_<hash>\claude-code-sessions`)
 - the same under `%USERPROFILE%\AppData`, in case `%APPDATA%` was overridden
 
 On macOS/Linux the same search runs over `~/Library/Application Support` /
-`~/.config`. Stores reached twice (junction/symlink) are counted once.
+`~/.config`. Stores reached twice (junction/symlink) are counted once. If
+none of the stores found holds a conversation (nothing found, or only empty
+leftovers), it also looks 4 levels deeper (a build that nests the folder
+differently).
+
+Builds before ~Feb 2026 reportedly used `local-agent-mode-sessions` for the
+same files; on current builds that sibling holds other sessions, so meld
+never syncs it by itself. `meld doctor` lists any folder laid out like a
+store (`<root>/<account>/<org>/local_*.json`) under another name and, when
+no real store exists, prints the `sessions_root` line to use it.
 
 Resolution (`config::pick_sessions_root`):
 

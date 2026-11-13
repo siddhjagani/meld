@@ -59,9 +59,12 @@ Read `context.md` first for current state and decisions.
 - State in `~/.meld/` (`config.toml`, `manifest.json`, `backups/`, `meld.lock`).
 - Cross-platform (macOS + Windows): session-root detection in `config.rs`
   searches (bounded depth, Claude/Anthropic-named folders only) for every
-  `claude-code-sessions` store — on Windows including MSIX package folders
-  (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`) — and the store with the
-  newest session file wins (`meld doctor` lists them all); a configured `sessions_root` that doesn't exist
+  `claude-code-sessions` store — on Windows including the current MSIX
+  build's `%LOCALAPPDATA%\Claude-Data\claude_<hash>\` and older package
+  folders (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`) — and the store
+  with the newest session file wins, searching deeper if none holds any (`meld doctor`
+  lists them all, plus lookalike folders such as a legacy
+  `local-agent-mode-sessions`, which are never picked automatically); a configured `sessions_root` that doesn't exist
   falls back to detection. `lock.rs` has cfg(unix)/cfg(windows) process-alive
   checks (no libc crate — tiny extern shims); mtime preservation uses the
   `filetime` crate; renames over existing files go through

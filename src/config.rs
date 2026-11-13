@@ -87,6 +87,9 @@ fn claude_named(name: &std::ffi::OsStr) -> bool {
     })
 }
 
+/// Levels the fallback search adds when the known layout holds no store.
+const DEEP_EXTRA: usize = 4;
+
 /// Every `claude-code-sessions` folder inside a Claude-named child of
 /// `base`, at most `depth` levels below `base`. Searched instead of assumed,
 /// so a different package hash, a `LocalState` folder or another channel is
@@ -107,7 +110,7 @@ fn find_stores(base: &Path, depth: usize) -> Vec<PathBuf> {
         }
         if e.depth() == 1 && !claude_named(e.file_name()) {
             walk.skip_current_dir();
-        } else if e.file_name() == "claude-code-sessions" {
+        } else if e.file_name().eq_ignore_ascii_case("claude-code-sessions") {
             found.push(e.into_path());
             walk.skip_current_dir();
         }
@@ -115,28 +118,31 @@ fn find_stores(base: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
-/// Windows candidates, given `%LOCALAPPDATA%` and `%APPDATA%`.
+/// Windows search bases, given `%LOCALAPPDATA%` and `%APPDATA%`, each with
+/// how deep a store sits in the known layout.
 ///
 /// The installer from claude.ai, the Microsoft Store and winget all install
 /// Claude as an MSIX package, and Windows silently redirects the packaged
 /// app's `%APPDATA%` / `%LOCALAPPDATA%` writes into
 /// `%LOCALAPPDATA%\Packages\Claude_<publisher-hash>\LocalCache\{Roaming,Local}`
 /// (`<pkg>\LocalCache\Roaming\Claude\claude-code-sessions`: 5 levels down).
-/// meld is not packaged, so it has to look there itself. The older non-MSIX
-/// installer used the real `%APPDATA%` / `%LOCALAPPDATA%`. If no store is
-/// found, the only entry is where the installed build would create one (for
-/// the error message).
+/// meld is not packaged, so it has to look there itself. Newer MSIX builds
+/// (seen on 5.1231) opt out of that and keep their data in
+/// `%LOCALAPPDATA%\Claude-Data\claude_<publisher-hash>\claude-code-sessions`
+/// (3 levels down). The older non-MSIX installer used the real `%APPDATA%` /
+/// `%LOCALAPPDATA%` (2 levels down).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_candidates(local: &Path, roaming: &Path) -> Vec<PathBuf> {
-    let packages = local.join("Packages");
-    let mut c = find_stores(&packages, 5);
-    c.extend(find_stores(roaming, 2));
-    c.extend(find_stores(local, 2));
-    if !c.is_empty() {
-        return c;
-    }
-    // Prefer the known `Claude_<hash>` package name over other Claude-named ones.
-    let package = std::fs::read_dir(&packages).ok().and_then(|d| {
+fn windows_bases(local: &Path, roaming: &Path) -> Vec<(PathBuf, usize)> {
+    vec![(local.join("Packages"), 5), (local.to_path_buf(), 3), (roaming.to_path_buf(), 3)]
+}
+
+/// Where a Windows store would be created when none exists yet: for the
+/// installed Claude package (preferring the known `Claude_<hash>` name), the
+/// current build's `%LOCALAPPDATA%\Claude-Data\claude_<hash>`; else the old
+/// installer's `%APPDATA%\Claude`. Only used for the error message.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_expected_store(local: &Path, roaming: &Path) -> PathBuf {
+    let package = std::fs::read_dir(local.join("Packages")).ok().and_then(|d| {
         d.flatten()
             .filter(|e| claude_named(&e.file_name()))
             .map(|e| e.path())
@@ -145,11 +151,122 @@ fn windows_candidates(local: &Path, roaming: &Path) -> Vec<PathBuf> {
                 (!n.starts_with("claude_"), n)
             })
     });
-    c.push(match package {
-        Some(p) => p.join("LocalCache").join("Roaming").join("Claude").join("claude-code-sessions"),
+    match package.and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase())) {
+        Some(name) => local.join("Claude-Data").join(name).join("claude-code-sessions"),
         None => roaming.join("Claude").join("claude-code-sessions"),
-    });
-    c
+    }
+}
+
+/// `%LOCALAPPDATA%` and `%APPDATA%`, falling back to the profile's AppData.
+#[cfg(target_os = "windows")]
+fn windows_dirs() -> (PathBuf, PathBuf) {
+    let profile = home_dir().join("AppData");
+    let dir = |var: &str, fallback: &str| {
+        std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| profile.join(fallback))
+    };
+    (dir("LOCALAPPDATA", "Local"), dir("APPDATA", "Roaming"))
+}
+
+/// Where Claude's app data can live on this platform, each with how deep a
+/// store sits in the known layout.
+fn search_bases() -> Vec<(PathBuf, usize)> {
+    #[cfg(target_os = "windows")]
+    {
+        let (local, roaming) = windows_dirs();
+        let mut b = windows_bases(&local, &roaming);
+        // %APPDATA% can be overridden in a shell (MCP setups do this):
+        // also look in the profile's own AppData.
+        let profile = home_dir().join("AppData");
+        b.extend(windows_bases(&profile.join("Local"), &profile.join("Roaming")));
+        b
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = if cfg!(target_os = "macos") {
+            home_dir().join("Library/Application Support")
+        } else {
+            home_dir().join(".config")
+        };
+        vec![(base, 2)]
+    }
+}
+
+/// Where the store would be created when none exists yet.
+fn expected_store() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let (local, roaming) = windows_dirs();
+        windows_expected_store(&local, &roaming)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        search_bases()[0].0.join("Claude").join("claude-code-sessions")
+    }
+}
+
+/// Every `claude-code-sessions` store under `bases`. When the known layout
+/// holds no conversations (nothing found, or only empty leftovers), also
+/// look `DEEP_EXTRA` levels deeper, in case a build nests it differently.
+fn search_stores(bases: &[(PathBuf, usize)]) -> Vec<PathBuf> {
+    let search = |extra: usize| -> Vec<PathBuf> {
+        bases.iter().flat_map(|(b, d)| find_stores(b, d + extra)).collect()
+    };
+    let mut found = search(0);
+    if !found.iter().any(|s| session_stats(s).1.is_some()) {
+        found.extend(search(DEEP_EXTRA));
+    }
+    dedup(found)
+}
+
+/// Folders laid out like a session store (`<root>/<account>/<org>/local_*.json`)
+/// under a Claude-named folder but not named `claude-code-sessions` — e.g. an
+/// older build's `local-agent-mode-sessions`. Never used on their own (on
+/// current builds that folder holds other sessions); `meld doctor` lists them
+/// so the user can point `sessions_root` at the right one.
+fn find_lookalikes(bases: &[(PathBuf, usize)]) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for (base, depth) in bases {
+        let mut walk = walkdir::WalkDir::new(base)
+            .min_depth(1)
+            .max_depth(depth + DEEP_EXTRA + 1)
+            .follow_links(true)
+            .sort_by_file_name()
+            .into_iter();
+        while let Some(entry) = walk.next() {
+            let Ok(e) = entry else { continue };
+            let name = e.file_name();
+            if e.file_type().is_dir() {
+                if (e.depth() == 1 && !claude_named(name))
+                    || name.eq_ignore_ascii_case("claude-code-sessions")
+                {
+                    walk.skip_current_dir();
+                }
+                continue;
+            }
+            let session = name
+                .to_str()
+                .is_some_and(|n| n.starts_with("local_") && n.ends_with(".json"));
+            // file -> org -> account -> store root
+            if let Some(root) = e.path().ancestors().nth(3).filter(|_| session && e.depth() >= 4) {
+                if !found.iter().any(|f| f == root) {
+                    found.push(root.to_path_buf());
+                }
+            }
+        }
+    }
+    dedup(found)
+}
+
+/// Lookalike stores on this machine (see `find_lookalikes`), with their
+/// conversation count and newest write, for `meld doctor`.
+pub fn lookalike_stores() -> Vec<(PathBuf, usize, Option<SystemTime>)> {
+    find_lookalikes(&search_bases())
+        .into_iter()
+        .map(|c| {
+            let (n, t) = session_stats(&c);
+            (c, n, t)
+        })
+        .collect()
 }
 
 /// Drop repeats, including one store reached twice through a junction or
@@ -170,31 +287,10 @@ fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Every place Claude may keep its session store on this platform: the
-/// stores found first, then the default location. Never empty.
+/// stores found first, then where it would be created. Never empty.
 fn candidates_sessions_roots() -> Vec<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let c = {
-        let profile = home_dir().join("AppData");
-        let dir = |var: &str, fallback: &str| {
-            std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| profile.join(fallback))
-        };
-        let mut c = windows_candidates(&dir("LOCALAPPDATA", "Local"), &dir("APPDATA", "Roaming"));
-        // %APPDATA% can be overridden in a shell (MCP setups do this):
-        // also look in the profile's own AppData.
-        c.extend(windows_candidates(&profile.join("Local"), &profile.join("Roaming")));
-        c
-    };
-    #[cfg(not(target_os = "windows"))]
-    let c = {
-        let base = if cfg!(target_os = "macos") {
-            home_dir().join("Library/Application Support")
-        } else {
-            home_dir().join(".config")
-        };
-        let mut c = find_stores(&base, 2);
-        c.push(base.join("Claude").join("claude-code-sessions"));
-        c
-    };
+    let mut c = search_stores(&search_bases());
+    c.push(expected_store());
     dedup(c)
 }
 
@@ -342,10 +438,14 @@ mod tests {
         // package, even with another Claude-named package sorting first.
         fs::create_dir_all(pkgs.join("Claude_pzs8sxrjxfjjc").join("LocalCache")).unwrap();
         fs::create_dir_all(pkgs.join("Anthropic.Claude_1234abcd")).unwrap();
-        let c = windows_candidates(&local, &roaming);
+        let bases = windows_bases(&local, &roaming);
+        assert!(search_stores(&bases).is_empty());
         let pkg = pkgs.join("Claude_pzs8sxrjxfjjc");
         let msix = pkg.join("LocalCache").join("Roaming").join("Claude").join("claude-code-sessions");
-        assert_eq!(c, vec![msix.clone()]);
+        // Where Claude 5.x keeps it (verified on a real install): outside the
+        // package, under the lower-cased package family name.
+        let data = local.join("Claude-Data").join("claude_pzs8sxrjxfjjc").join("claude-code-sessions");
+        assert_eq!(windows_expected_store(&local, &roaming), data);
 
         // Stores in the usual place, under another hash, in LocalState, a
         // 3P/beta channel and the old installer's folder are all found.
@@ -358,12 +458,54 @@ mod tests {
         for d in [&msix, &other, &beta, &old, &p3, &unrelated] {
             fs::create_dir_all(d).unwrap();
         }
-        let c = windows_candidates(&local, &roaming);
-        for d in [&msix, &other, &beta, &old, &p3] {
+        session(&data, "x", 1_000);
+        let c = search_stores(&bases);
+        for d in [&data, &msix, &other, &beta, &old, &p3] {
             assert!(c.contains(d), "missing {}", d.display());
         }
         assert!(!c.contains(&unrelated));
-        assert_eq!(c.len(), 5, "no default entry once stores are found");
+        assert_eq!(c.len(), 6);
+        assert_eq!(pick_sessions_root(&c), Some(data), "the only store with conversations");
+    }
+
+    #[test]
+    fn deeper_store_is_found_only_when_the_usual_layout_has_none() {
+        let base = tmp_dir("deep");
+        let (local, roaming) = (base.join("Local"), base.join("Roaming"));
+        let deep = local
+            .join("Packages")
+            .join("Claude_pzs8sxrjxfjjc")
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude")
+            .join("Partitions")
+            .join("main")
+            .join("claude-code-sessions");
+        fs::create_dir_all(&deep).unwrap();
+        let bases = windows_bases(&local, &roaming);
+        assert_eq!(search_stores(&bases), vec![deep.clone()]);
+        // An empty leftover in the usual place doesn't stop the deeper look...
+        let usual = roaming.join("Claude").join("claude-code-sessions");
+        fs::create_dir_all(&usual).unwrap();
+        assert_eq!(search_stores(&bases), vec![usual.clone(), deep]);
+        // ...but a usual store with conversations does.
+        session(&usual, "x", 1_000);
+        assert_eq!(search_stores(&bases), vec![usual]);
+    }
+
+    #[test]
+    fn lookalike_stores_are_reported_but_never_picked() {
+        let base = tmp_dir("lookalike");
+        let roaming = base.join("Roaming");
+        let legacy = roaming.join("Claude").join("local-agent-mode-sessions");
+        session(&legacy, "x", 1_000);
+        let real = roaming.join("Claude").join("claude-code-sessions");
+        session(&real, "y", 1_000);
+        // Session-like files outside a Claude folder are not Claude's.
+        session(&roaming.join("Other").join("stuff"), "z", 1_000);
+        let bases = vec![(roaming.clone(), 2)];
+        assert_eq!(find_lookalikes(&bases), vec![legacy]);
+        assert_eq!(search_stores(&bases), vec![real]);
     }
 
     #[cfg(unix)]

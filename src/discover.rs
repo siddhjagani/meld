@@ -8,7 +8,11 @@ use std::path::PathBuf;
 pub fn discover_account_roots(cfg: &Config) -> Result<Vec<PathBuf>> {
     let root = &cfg.sessions_root;
     if !root.exists() {
-        return Err(MeldError::RootNotFound(root.display().to_string()).into());
+        return Err(MeldError::RootNotFound(
+            root.display().to_string(),
+            crate::config::config_path().display().to_string(),
+        )
+        .into());
     }
     let mut roots: Vec<PathBuf> = std::fs::read_dir(root)?
         .filter_map(|e| e.ok())

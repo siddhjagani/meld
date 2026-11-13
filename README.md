@@ -44,9 +44,10 @@ irm https://meld.dpdns.org/install.ps1 | iex
 ```
 
 macOS (Apple Silicon and Intel) and Windows are supported. On Windows meld
-finds sessions for both the current installer (an MSIX package, which keeps
-its data under `%LOCALAPPDATA%\Packages\Claude_…\LocalCache`) and the older
-one (`%APPDATA%\Claude`).
+finds sessions for the current installer (an MSIX package, which keeps them
+in `%LOCALAPPDATA%\Claude-Data\claude_…`), earlier MSIX builds
+(`%LOCALAPPDATA%\Packages\Claude_…\LocalCache`) and the older installer
+(`%APPDATA%\Claude`). `meld doctor` shows which folder it uses.
 
 ## Get started in three commands
 

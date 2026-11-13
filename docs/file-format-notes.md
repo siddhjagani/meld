@@ -113,10 +113,12 @@ bounded in depth so a large AppData stays fast:
 - the same under `%USERPROFILE%\AppData`, in case `%APPDATA%` was overridden
 
 On macOS/Linux the same search runs over `~/Library/Application Support` /
-`~/.config`. Stores reached twice (junction/symlink) are counted once. If
-none of the stores found holds a conversation (nothing found, or only empty
-leftovers), it also looks 4 levels deeper (a build that nests the folder
-differently).
+`~/.config`. Every location is always checked, up to 4 levels past the
+known layout, so a store Claude moves somewhere new is found even while an
+old one is still lying around; stores in the known layout are listed first
+(they win ties). Stores reached twice (junction/symlink) are counted once.
+The search takes ~0.04s on a heavily used macOS install and runs once per
+command.
 
 Builds before ~Feb 2026 reportedly used `local-agent-mode-sessions` for the
 same files; on current builds that sibling holds other sessions, so meld
@@ -140,7 +142,9 @@ write, marks the one in use, and warns when more than one holds
 conversations (meld syncs only one).
 
 A `sessions_root` pinned in `config.toml` wins, unless it doesn't exist —
-then meld warns and uses the detected store. `meld config init` writes it
+then meld warns and uses the detected store. Pinned or not, meld still
+checks every location and warns when another store has newer conversations.
+When nothing is found, the error lists every location searched. `meld config init` writes it
 commented out so it isn't pinned by accident.
 
 This means a user can legitimately have history in both stores and meld will

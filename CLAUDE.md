@@ -62,7 +62,9 @@ Read `context.md` first for current state and decisions.
   `claude-code-sessions` store — on Windows including the current MSIX
   build's `%LOCALAPPDATA%\Claude-Data\claude_<hash>\` and older package
   folders (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…`) — and the store
-  with the newest session file wins, searching deeper if none holds any (`meld doctor`
+  with the newest session file wins — every location is always checked, up
+  to 4 levels past the known layout; a pinned `sessions_root` is kept but
+  meld warns if another store is newer (`meld doctor`
   lists them all, plus lookalike folders such as a legacy
   `local-agent-mode-sessions`, which are never picked automatically); a configured `sessions_root` that doesn't exist
   falls back to detection. `lock.rs` has cfg(unix)/cfg(windows) process-alive

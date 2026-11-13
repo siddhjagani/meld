@@ -24,3 +24,14 @@ fn windows_login_command_quotes_paths_with_spaces() {
         r#""C:\Windows\System32\conhost.exe" --headless "C:\Users\Tanika Tech\AppData\Local\meld\bin\meld.exe" service run"#
     );
 }
+
+#[test]
+fn missing_session_folder_error_lists_where_meld_searched() {
+    let mut cfg = meld::config::Config::default();
+    cfg.sessions_root = std::env::temp_dir().join("meld-test-no-such-sessions-root");
+    let err = meld::discover::discover_account_roots(&cfg).unwrap_err().to_string();
+    assert!(err.contains("searched every Claude folder under:"), "{err}");
+    for loc in meld::config::search_locations() {
+        assert!(err.contains(&loc.display().to_string()), "{err}");
+    }
+}

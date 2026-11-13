@@ -322,7 +322,7 @@ fn print_session_stores(cfg: &Config) {
     let now = chrono::Utc::now().timestamp();
     let stores = config::session_stores();
     if !stores.is_empty() {
-        println!("  Session folders found:");
+        println!("  Session folders found (meld checks them all and uses the one marked →):");
         for (root, n, latest) in &stores {
             let mark = if same(root) { "→" } else { " " };
             println!("  {mark} {} ({})", root.display(), describe_store(*n, *latest, now));
@@ -368,9 +368,13 @@ fn doctor(cfg: &Config) -> Result<()> {
         &if found {
             format!("Claude Code session data found in {}", cfg.sessions_root.display())
         } else {
+            let searched: Vec<String> = config::search_locations()
+                .iter()
+                .map(|p| format!("\n    {}", p.display()))
+                .collect();
             format!(
-                "Could not find Claude Code session data (looked in {}) — is the desktop app installed, and have you started a Claude Code session in it?",
-                cfg.sessions_root.display()
+                "Could not find Claude Code session data — is the desktop app installed, and have you started a Claude Code session in it? Searched every Claude folder under:{}",
+                searched.concat()
             )
         },
     );

@@ -1,6 +1,6 @@
 [package]
 name = "meld"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "Local, reversible, account-aware sync for Claude Code desktop sessions"
 license = "MIT"

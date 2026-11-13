@@ -177,7 +177,11 @@ fn search_bases() -> Vec<(PathBuf, usize)> {
         // %APPDATA% can be overridden in a shell (MCP setups do this):
         // also look in the profile's own AppData.
         let profile = home_dir().join("AppData");
-        b.extend(windows_bases(&profile.join("Local"), &profile.join("Roaming")));
+        for extra in windows_bases(&profile.join("Local"), &profile.join("Roaming")) {
+            if !b.iter().any(|(p, _)| p == &extra.0) {
+                b.push(extra); // usually the same folders: don't walk them twice
+            }
+        }
         b
     }
     #[cfg(not(target_os = "windows"))]
@@ -204,18 +208,24 @@ fn expected_store() -> PathBuf {
     }
 }
 
-/// Every `claude-code-sessions` store under `bases`. When the known layout
-/// holds no conversations (nothing found, or only empty leftovers), also
-/// look `DEEP_EXTRA` levels deeper, in case a build nests it differently.
+/// Every `claude-code-sessions` store under `bases`: always all of them, up
+/// to `DEEP_EXTRA` levels past the known layout, so a store Claude moves
+/// somewhere new is found even while an old one is still lying around (the
+/// caller then picks the newest). Stores in the known layout come first, so
+/// they win ties.
 fn search_stores(bases: &[(PathBuf, usize)]) -> Vec<PathBuf> {
-    let search = |extra: usize| -> Vec<PathBuf> {
-        bases.iter().flat_map(|(b, d)| find_stores(b, d + extra)).collect()
-    };
-    let mut found = search(0);
-    if !found.iter().any(|s| session_stats(s).1.is_some()) {
-        found.extend(search(DEEP_EXTRA));
+    let mut found = Vec::new();
+    for extra in [0, DEEP_EXTRA] {
+        for (base, depth) in bases {
+            found.extend(find_stores(base, depth + extra));
+        }
     }
     dedup(found)
+}
+
+/// The folders meld searches for a session store (for messages).
+pub fn search_locations() -> Vec<PathBuf> {
+    search_bases().into_iter().map(|(b, _)| b).collect()
 }
 
 /// Folders laid out like a session store (`<root>/<account>/<org>/local_*.json`)
@@ -354,9 +364,15 @@ fn pick_sessions_root(candidates: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Platform default for the Claude Code desktop session store.
+/// Computed once per run (`Config::default` and `Config::load` both ask).
 fn default_sessions_root() -> PathBuf {
-    let candidates = candidates_sessions_roots();
-    pick_sessions_root(&candidates).unwrap_or_else(|| candidates[0].clone())
+    static DETECTED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DETECTED
+        .get_or_init(|| {
+            let candidates = candidates_sessions_roots();
+            pick_sessions_root(&candidates).unwrap_or_else(|| candidates[0].clone())
+        })
+        .clone()
 }
 
 pub fn config_path() -> PathBuf {
@@ -469,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn deeper_store_is_found_only_when_the_usual_layout_has_none() {
+    fn every_store_is_checked_and_the_newest_chosen() {
         let base = tmp_dir("deep");
         let (local, roaming) = (base.join("Local"), base.join("Roaming"));
         let deep = local
@@ -481,16 +497,18 @@ mod tests {
             .join("Partitions")
             .join("main")
             .join("claude-code-sessions");
-        fs::create_dir_all(&deep).unwrap();
-        let bases = windows_bases(&local, &roaming);
-        assert_eq!(search_stores(&bases), vec![deep.clone()]);
-        // An empty leftover in the usual place doesn't stop the deeper look...
         let usual = roaming.join("Claude").join("claude-code-sessions");
-        fs::create_dir_all(&usual).unwrap();
-        assert_eq!(search_stores(&bases), vec![usual.clone(), deep]);
-        // ...but a usual store with conversations does.
-        session(&usual, "x", 1_000);
-        assert_eq!(search_stores(&bases), vec![usual]);
+        session(&usual, "x", 2_000);
+        session(&deep, "x", 1_000);
+        let bases = windows_bases(&local, &roaming);
+        // A populated store in the usual place doesn't stop the search, and
+        // the usual place comes first.
+        let c = search_stores(&bases);
+        assert_eq!(c, vec![usual.clone(), deep.clone()]);
+        assert_eq!(pick_sessions_root(&c), Some(usual.clone()));
+        // Claude moved on and writes the deep one now: it is chosen.
+        session(&deep, "y", 3_000);
+        assert_eq!(pick_sessions_root(&search_stores(&bases)), Some(deep));
     }
 
     #[test]
@@ -536,8 +554,8 @@ impl Config {
             // A pinned folder that no longer exists (e.g. Claude reinstalled as
             // the Windows MSIX package, which stores sessions elsewhere) can't
             // work; use the detected store instead of failing every run.
+            let detected = default_sessions_root();
             if !cfg.sessions_root.exists() {
-                let detected = default_sessions_root();
                 if detected.exists() {
                     crate::logging::warn(&format!(
                         "sessions_root {} (set in {}) does not exist; using {} instead",
@@ -547,6 +565,16 @@ impl Config {
                     ));
                     cfg.sessions_root = detected;
                 }
+            } else if session_stats(&detected).1 > session_stats(&cfg.sessions_root).1 {
+                // Pinned on purpose, so keep it, but say what checking every
+                // folder found.
+                crate::logging::warn(&format!(
+                    "sessions_root is set to {} in {}, but {} has newer conversations; \
+                     remove that line to let meld choose automatically",
+                    cfg.sessions_root.display(),
+                    path.display(),
+                    detected.display()
+                ));
             }
             Ok(cfg)
         } else {
